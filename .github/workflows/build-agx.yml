@@ -1,0 +1,228 @@
+name: Build AgX Punchy GTA SA ARM32
+
+on:
+  push:
+    paths:
+      - '**.zip'
+      - '**/*.zip'
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Optional repository path to the uploaded ZIP'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout just-mods
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select and extract the uploaded ZIP
+        shell: bash
+        env:
+          REQUESTED_ZIP: ${{ inputs.zip_path }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/agx-input"
+          selected=""
+
+          if [ -n "$REQUESTED_ZIP" ]; then
+            if [ ! -f "$REQUESTED_ZIP" ]; then
+              echo "::error::ZIP not found: $REQUESTED_ZIP"
+              exit 1
+            fi
+            selected="$REQUESTED_ZIP"
+          else
+            # Prefer a ZIP added or modified by this push.
+            while IFS= read -r file; do
+              if [[ "$file" =~ \.zip$ ]] && [ -f "$file" ]; then
+                selected="$file"
+                break
+              fi
+            done < <(
+              git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA"
+            )
+          fi
+
+          # For manual runs without a selected path, use the most
+          # recently committed ZIP in the repository.
+          if [ -z "$selected" ]; then
+            best_time=0
+
+            while IFS= read -r -d '' file; do
+              timestamp="$(git log -1 --format=%ct -- "$file" || true)"
+              timestamp="${timestamp:-0}"
+
+              if [[ "$timestamp" =~ ^[0-9]+$ ]] &&
+                 [ "$timestamp" -ge "$best_time" ]; then
+                best_time="$timestamp"
+                selected="$file"
+              fi
+            done < <(find . -type f -iname '*.zip' \
+              -not -path './.git/*' -print0)
+          fi
+
+          if [ -z "$selected" ]; then
+            echo "::error::No ZIP found. Upload your kit ZIP first."
+            exit 1
+          fi
+
+          echo "Selected input: $selected"
+          unzip -t "$selected"
+          unzip -q "$selected" -d "$RUNNER_TEMP/agx-input"
+
+          # Find the grading shader regardless of any extra top-level
+          # directory inside the ZIP.
+          shader="$(
+            find "$RUNNER_TEMP/agx-input" -type f \
+              -path '*/shaders/fragment/grading.glsl' -print -quit
+          )"
+
+          if [ -z "$shader" ]; then
+            echo "::error::The ZIP does not contain shaders/fragment/grading.glsl"
+            echo "ZIP contents:"
+            find "$RUNNER_TEMP/agx-input" -maxdepth 6 -type f
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/agx-files/shaders/fragment"
+          cp "$shader" \
+            "$RUNNER_TEMP/agx-files/shaders/fragment/grading.glsl"
+
+          echo "Shader located and normalized:"
+          echo "$RUNNER_TEMP/agx-files/shaders/fragment/grading.glsl"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip
+
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Checkout SAShaderL source
+        uses: actions/checkout@v4
+        with:
+          repository: AndroidModLoader/SAShaderL
+          ref: main
+          path: SAShaderL
+          submodules: recursive
+
+      - name: Restore AML source files required by SAShaderL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 --recurse-submodules \
+            https://github.com/AndroidModLoader/AndroidModLoader.git \
+            AML-source
+
+          for file in logger.cpp logger.h config.h amlmod.h; do
+            if [ ! -f "AML-source/mod/$file" ]; then
+              echo "::error::Missing upstream AML file: mod/$file"
+              exit 1
+            fi
+          done
+
+          # SAShaderL's Android.mk expects mod/logger.cpp, but its
+          # repository does not contain the mod directory.
+          mkdir -p SAShaderL/mod
+          cp -R AML-source/mod/. SAShaderL/mod/
+
+          test -f SAShaderL/mod/logger.cpp
+          test -f SAShaderL/mod/logger.h
+          test -f SAShaderL/mod/config.h
+          test -f SAShaderL/mod/amlmod.h
+
+          echo "Required AML files restored."
+          ls -la SAShaderL/mod
+
+      - name: Build native ARM32 library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd SAShaderL
+
+          test -f Android.mk
+          test -f Application.mk
+          test -f main.cpp
+          test -f mod/logger.cpp
+
+          ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=Android.mk \
+            NDK_APPLICATION_MK=Application.mk \
+            APP_ABI=armeabi-v7a \
+            APP_PLATFORM=android-21 \
+            NDK_OUT="$RUNNER_TEMP/ndk-obj" \
+            NDK_LIBS_OUT="$RUNNER_TEMP/ndk-libs" \
+            -j2
+
+          so="$RUNNER_TEMP/ndk-libs/armeabi-v7a/libSAShaderL.so"
+
+          if [ ! -f "$so" ]; then
+            echo "::error::Expected ARM32 library was not produced."
+            echo "Build output files:"
+            find "$RUNNER_TEMP/ndk-libs" -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/agx-package"
+          cp "$so" "$RUNNER_TEMP/agx-package/libSAShaderL.so"
+
+          file "$so"
+          ls -lh "$so"
+
+      - name: Package library and shader
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/agx-package/files/shaders/fragment"
+
+          cp "$RUNNER_TEMP/agx-files/shaders/fragment/grading.glsl" \
+            "$RUNNER_TEMP/agx-package/files/shaders/fragment/grading.glsl"
+
+          cat > "$RUNNER_TEMP/agx-package/INSTALL.txt" <<'EOF'
+          AgX Punchy GTA SA - ARM32
+
+          Contents:
+            libSAShaderL.so
+            files/shaders/fragment/grading.glsl
+
+          Copy grading.glsl to:
+            Android/data/com.rockstargames.gtasa/files/shaders/fragment/grading.glsl
+
+          Install libSAShaderL.so through your compatible AML mod installation
+          method. Back up existing files before replacing them.
+
+          This build targets armeabi-v7a. Compilation alone does not guarantee
+          compatibility with every GTA SA or AML version.
+          EOF
+
+          cd "$RUNNER_TEMP/agx-package"
+          zip -qr "$GITHUB_WORKSPACE/AgX-Punchy-GTA-SA-ARM32.zip" .
+
+          unzip -t "$GITHUB_WORKSPACE/AgX-Punchy-GTA-SA-ARM32.zip"
+          unzip -l "$GITHUB_WORKSPACE/AgX-Punchy-GTA-SA-ARM32.zip"
+
+      - name: Upload downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgX-Punchy-GTA-SA-ARM32
+          path: AgX-Punchy-GTA-SA-ARM32.zip
+          if-no-files-found: error
+          retention-days: 14
