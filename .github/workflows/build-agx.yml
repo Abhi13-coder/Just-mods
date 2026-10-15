@@ -1,0 +1,136 @@
+name: Build AgX Punchy GTA SA ARM32
+
+on:
+  push:
+    paths:
+      - '**.zip'
+      - '**/*.zip'
+      - '.github/workflows/build-agx.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout just-mods
+        uses: actions/checkout@v4
+
+      - name: Find and extract shader ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/agx-extracted"
+          found=""
+
+          while IFS= read -r -d '' archive; do
+            echo "Checking archive: $archive"
+            candidate="$RUNNER_TEMP/agx-candidate"
+            rm -rf "$candidate"
+            mkdir -p "$candidate"
+
+            if ! unzip -q "$archive" -d "$candidate"; then
+              echo "Skipping invalid ZIP: $archive"
+              continue
+            fi
+
+            shader="$(find "$candidate" -type f \
+              -path '*/shaders/fragment/grading.glsl' -print -quit)"
+
+            if [ -n "$shader" ]; then
+              cp "$shader" "$RUNNER_TEMP/agx-grading.glsl"
+              found="$archive"
+              break
+            fi
+          done < <(find . -type f -name '*.zip' \
+            -not -path './.git/*' -print0)
+
+          if [ -z "$found" ]; then
+            echo "::error::No ZIP containing shaders/fragment/grading.glsl was found."
+            echo "Upload the AgX Punchy kit ZIP to this repository."
+            exit 1
+          fi
+
+          echo "Selected archive: $found"
+          echo "Found compatible grading shader."
+          echo "SOURCE_ZIP=$found" >> "$GITHUB_ENV"
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Checkout SAShaderL source
+        uses: actions/checkout@v4
+        with:
+          repository: AndroidModLoader/SAShaderL
+          path: SAShaderL
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip
+
+      - name: Build ARM32 native library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd SAShaderL
+
+          if [ ! -f Android.mk ]; then
+            echo "::error::Expected Android.mk in SAShaderL root was not found."
+            find . -name Android.mk -o -name CMakeLists.txt
+            exit 1
+          fi
+
+          ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=Android.mk \
+            APP_ABI=armeabi-v7a \
+            -j2
+
+          so="$(find . -type f -name 'libSAShaderL.so' -print -quit)"
+
+          if [ -z "$so" ]; then
+            echo "::error::Build finished without producing libSAShaderL.so."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/agx-package/files/shaders/fragment"
+          cp "$so" "$RUNNER_TEMP/agx-package/libSAShaderL.so"
+          cp "$RUNNER_TEMP/agx-grading.glsl" \
+            "$RUNNER_TEMP/agx-package/files/shaders/fragment/grading.glsl"
+
+          cat > "$RUNNER_TEMP/agx-package/INSTALL.txt" <<'EOF'
+          AgX Punchy GTA SA ARM32 package
+
+          Native library:
+            libSAShaderL.so
+
+          Shader destination:
+            Android/data/com.rockstargames.gtasa/files/shaders/fragment/grading.glsl
+
+          Install the native library using the appropriate AML mod installation
+          method for your GTA SA Android version. Copy grading.glsl to the
+          destination above. Back up existing files before replacing them.
+
+          This package targets armeabi-v7a. Successful compilation does not
+          guarantee compatibility with every GTA SA or AML version.
+          EOF
+
+          cd "$RUNNER_TEMP/agx-package"
+          zip -qr "$GITHUB_WORKSPACE/AgX-Punchy-GTA-SA-ARM32.zip" .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgX-Punchy-GTA-SA-ARM32
+          path: AgX-Punchy-GTA-SA-ARM32.zip
+          if-no-files-found: error
+          retention-days: 14
