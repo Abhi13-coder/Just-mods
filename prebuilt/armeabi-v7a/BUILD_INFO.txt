@@ -3,3 +3,6 @@ ndk=28.2.13676358
 litert_lm_sha=de80bb14fa4c16c734cd3a8670b7e90f9d4cd156
 gallery_sha=9acbd4e1719924d7c7bb2f292cfdbe28a8224354
 note=FST constraints disabled (LLGuidance path); see attempt log if a stub was used
+repaired_at=2026-11-04T23:22:19Z
+repair=patchelf: _Unwind_* now come from libunwindshim.so (static NDK libunwind), Android 10 compatible
+repair_unwinder=/usr/local/lib/android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/19/lib/linux/arm/libunwind.a
