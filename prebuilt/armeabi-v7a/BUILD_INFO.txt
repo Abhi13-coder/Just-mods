@@ -1,0 +1,5 @@
+built_at=2026-11-04T17:36:45Z
+ndk=28.2.13676358
+litert_lm_sha=de80bb14fa4c16c734cd3a8670b7e90f9d4cd156
+gallery_sha=9acbd4e1719924d7c7bb2f292cfdbe28a8224354
+note=FST constraints disabled (LLGuidance path); see attempt log if a stub was used
