@@ -531,18 +531,22 @@ jobs:
           rm -rf LiteRT-LM || true
           df -h
 
-      - name: Build Gallery APK
+            - name: Build Gallery APK
         working-directory: gallery/Android/src
         run: |
           set -eo pipefail
           chmod +x gradlew
           ./gradlew :app:assembleDebug \
-            -Pandroid.injected.build.abi=armeabi-v7a \
             --stacktrace \
             --no-daemon 2>&1 | tee build.log
 
           find app/build/outputs -name "*.apk" | tee /tmp/apk-paths.txt
           APK=$(head -1 /tmp/apk-paths.txt)
+          if [ -z "$APK" ]; then
+            echo "No APK under app/build/outputs — searching whole build dir:"
+            find app/build -iname "*.apk" 2>/dev/null | tee -a /tmp/apk-paths.txt
+            APK=$(head -1 /tmp/apk-paths.txt)
+          fi
           if [ -z "$APK" ]; then
             echo "No APK produced"
             exit 1
