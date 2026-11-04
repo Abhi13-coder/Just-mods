@@ -168,8 +168,10 @@ jobs:
             fi
             args+=("${EXTRA[@]}")
             echo ">>> bazel build ${args[*]} $TARGET"
-            timeout 70m bazel build "${args[@]}" "$TARGET" >"$ATTEMPT" 2>&1
-            local rc=$?
+                        timeout 150m bazel build "${args[@]}" --curses=no --color=no \
+              --show_progress_rate_limit=30 --progress_report_interval=60 \
+              "$TARGET" 2>&1 | tee "$ATTEMPT"
+            local rc=${PIPESTATUS[0]}
             cat "$ATTEMPT" >> "$LOG"
             return $rc
           }
