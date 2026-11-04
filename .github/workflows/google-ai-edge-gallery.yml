@@ -1,0 +1,1261 @@
+name: Gallery Android10 ARM32
+
+on:
+  workflow_dispatch:
+    inputs:
+      rebuild_so:
+        description: "Force a fresh LiteRT-LM compile even if a saved liblitertlm_jni.so exists in the repo"
+        type: boolean
+        default: false
+      litert_lm_ref:
+        description: "LiteRT-LM branch/tag/SHA for both JNI and Kotlin API (default: de80bb14fa4c16c734cd3a8670b7e90f9d4cd156)"
+        type: string
+        default: "de80bb14fa4c16c734cd3a8670b7e90f9d4cd156"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gallery-arm32
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean || true
+          df -h
+
+      - name: Checkout this repo (holds the saved .so)
+        uses: actions/checkout@v4
+        with:
+          path: self
+          fetch-depth: 0
+
+      - name: Check for saved liblitertlm_jni.so
+        id: chk
+        env:
+          REBUILD: ${{ inputs.rebuild_so }}
+        run: |
+          SO=self/prebuilt/armeabi-v7a/liblitertlm_jni.so
+          NEED=true
+          REPAIR=false
+          if [ -s "$SO" ] && file "$SO" | grep -q "ELF 32-bit.*ARM"; then
+            echo "Saved .so found:"
+            ls -lh "$SO"
+            cat self/prebuilt/armeabi-v7a/BUILD_INFO.txt 2>/dev/null || true
+            BAD="$(readelf --dyn-syms -W "$SO" 2>/dev/null | awk '$7=="UND" && $5=="GLOBAL"' | grep -E '@LIBC_(R|S|T|U|V|W)( |$)' || true)"
+            if [ "$REBUILD" = "true" ]; then
+              echo "rebuild_so=true -> compiling from source (the saved .so is only replaced if the new one passes every check)"
+            else
+              NEED=false
+              if [ -n "$BAD" ]; then
+                echo "Saved .so needs libc symbols from Android 11+ (it crashes on Android 10):"
+                echo "$BAD" | head -12
+                echo "-> it will be repaired in place (no Bazel build)"
+                REPAIR=true
+              else
+                echo "Skipping the Bazel compile, going straight to inject + APK build"
+              fi
+            fi
+          else
+            echo "No valid saved .so -> compiling from source"
+          fi
+          echo "need_build=$NEED" >> "$GITHUB_OUTPUT"
+          echo "need_repair=$REPAIR" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Gallery
+        uses: actions/checkout@v4
+        with:
+          repository: google-ai-edge/gallery
+          path: gallery
+          fetch-depth: 1
+
+      # The Kotlin API must come from the exact same LiteRT-LM revision as the JNI .so.
+      - name: Checkout LiteRT-LM 0.20.0 Kotlin API
+        uses: actions/checkout@v4
+        with:
+          repository: google-ai-edge/LiteRT-LM
+          ref: ${{ inputs.litert_lm_ref || 'de80bb14fa4c16c734cd3a8670b7e90f9d4cd156' }}
+          path: LiteRT-LM-api
+          fetch-depth: 1
+          sparse-checkout: |
+            kotlin/java/com/google/ai/edge/litertlm
+          sparse-checkout-cone-mode: true
+
+      - name: Resolve LiteRT-LM API revision
+        id: api_revision
+        run: |
+          SHA="$(git -C LiteRT-LM-api rev-parse HEAD)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Using LiteRT-LM API/JNI revision: $SHA"
+
+      - name: Checkout LiteRT-LM (JNI source, only when rebuilding)
+        if: steps.chk.outputs.need_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: google-ai-edge/LiteRT-LM
+          ref: ${{ inputs.litert_lm_ref || 'de80bb14fa4c16c734cd3a8670b7e90f9d4cd156' }}
+          path: LiteRT-LM
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK (NDKs are installed on demand)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0 cmake;3.22.1"
+
+      - name: Preflight - find the NDK static unwinder (fails fast)
+        id: pre
+        if: steps.chk.outputs.need_build == 'true' || steps.chk.outputs.need_repair == 'true'
+        run: |
+          set +e
+          SDKM="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          FOUND=""
+          NDK_V=""
+          for V in 28.2.13676358 27.2.12479018 26.3.11579264; do
+            if [ ! -d "$ANDROID_HOME/ndk/$V" ]; then
+              echo ">>> installing NDK $V"
+              yes | "$SDKM" --install "ndk;$V" > "/tmp/sdkmanager-$V.log" 2>&1
+            fi
+            if [ ! -d "$ANDROID_HOME/ndk/$V" ]; then echo "NDK $V unavailable"; continue; fi
+            LLVM="$ANDROID_HOME/ndk/$V/toolchains/llvm/prebuilt/linux-x86_64"
+            A="$(find "$LLVM" -name libunwind.a 2>/dev/null | grep -E '/arm/|arm-linux-androideabi' | grep -v -E 'aarch64|arm64' | head -1)"
+            echo "NDK $V: ARM32 libunwind.a = ${A:-NOT FOUND}"
+            if [ -z "$A" ]; then
+              echo "Unwind-related files in this NDK:"
+              find "$LLVM" -iname '*unwind*' 2>/dev/null | head -20
+              continue
+            fi
+            DEFINED="$("$LLVM/bin/llvm-nm" -g --defined-only "$A" 2>/dev/null)"
+            MISSING=""
+            for s in _Unwind_RaiseException _Unwind_Resume _Unwind_Backtrace _Unwind_DeleteException _Unwind_VRS_Get _Unwind_VRS_Set _Unwind_GetDataRelBase _Unwind_GetTextRelBase _Unwind_GetLanguageSpecificData _Unwind_GetRegionStart __gnu_unwind_frame; do
+              echo "$DEFINED" | grep -qE " [TW] $s\$" || MISSING="$MISSING $s"
+            done
+            if [ -n "$MISSING" ]; then
+              echo "This libunwind.a does not define:$MISSING"
+              continue
+            fi
+            FOUND="$A"
+            NDK_V="$V"
+            break
+          done
+          if [ -z "$FOUND" ]; then
+            echo "::error::No installed NDK has a usable static ARM32 libunwind.a (details above). Stopping before the long build."
+            exit 1
+          fi
+          echo "Using NDK $NDK_V with unwinder $FOUND"
+          {
+            echo "unwind_a=$FOUND"
+            echo "ndk_v=$NDK_V"
+            echo "ndk_home=$ANDROID_HOME/ndk/$NDK_V"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Bazelisk + clang
+        if: steps.chk.outputs.need_build == 'true'
+        run: |
+          sudo curl -L -o /usr/local/bin/bazel \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          sudo chmod +x /usr/local/bin/bazel
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq clang libclang-dev lld || true
+          bazel version || true
+
+      - name: Restore Bazel caches
+        if: steps.chk.outputs.need_build == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/bazel-disk
+            ~/.cache/bazel-repo
+          key: bazel-arm32-v2-${{ github.run_id }}
+          restore-keys: |
+            bazel-arm32-v2-
+
+      - name: Patch Gallery (minSdk 29 + armeabi-v7a only)
+        working-directory: gallery/Android/src
+        run: |
+          set -e
+          sed -i -E 's/minSdk *= *[0-9]+/minSdk = 29/' app/build.gradle.kts
+          sed -i -E 's/targetSdk *= *[0-9]+/targetSdk = 29/' app/build.gradle.kts
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path("app/build.gradle.kts")
+          t = p.read_text()
+          if "abiFilters" not in t:
+              t = re.sub(r"(defaultConfig\s*\{)", r'\1\n        ndk { abiFilters += listOf("armeabi-v7a") }', t, count=1)
+          if "pickFirsts" not in t:
+              t = re.sub(r"(android\s*\{)", r'\1\n    packaging { jniLibs { pickFirsts += "**/liblitertlm_jni.so"; keepDebugSymbols += "**/liblitertlm_jni.so"; keepDebugSymbols += "**/libunwindshim.so" } }', t, count=1)
+          p.write_text(t)
+          print("Patched build.gradle.kts")
+          PY
+
+          grep -nE "minSdk|targetSdk|abiFilters|pickFirsts" app/build.gradle.kts || true
+
+      - name: Integrate matching LiteRT-LM Kotlin API source
+        working-directory: gallery/Android/src
+        env:
+          EXPECTED_LITERT_SHA: ${{ inputs.litert_lm_ref || 'de80bb14fa4c16c734cd3a8670b7e90f9d4cd156' }}
+        run: |
+          set -euo pipefail
+          API_DIR="$GITHUB_WORKSPACE/LiteRT-LM-api/kotlin/java/com/google/ai/edge/litertlm"
+          DEST="app/src/main/java/com/google/ai/edge/litertlm"
+          test -d "$API_DIR"
+          ACTUAL_SHA="$(git -C "$GITHUB_WORKSPACE/LiteRT-LM-api" rev-parse HEAD)"
+          echo "LiteRT-LM Kotlin API SHA: $ACTUAL_SHA"
+          echo "Expected SHA/ref: $EXPECTED_LITERT_SHA"
+          mkdir -p "$DEST"
+          find "$API_DIR" -maxdepth 1 -type f -name '*.kt' -exec cp -f {} "$DEST/" \;
+          COUNT="$(find "$DEST" -maxdepth 1 -type f -name '*.kt' | wc -l)"
+          echo "Copied Kotlin API files: $COUNT"
+          test "$COUNT" -ge 16
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          gradle = Path("app/build.gradle.kts")
+          text = gradle.read_text()
+
+          pattern = r'^\s*implementation\(libs\.litertlm\)\s*\n?'
+          text, n = re.subn(pattern, '', text, flags=re.M)
+
+          if n != 1:
+              print("LiteRT-LM references found:")
+              for line in text.splitlines():
+                  if "litertlm" in line.lower():
+                      print(repr(line))
+              raise SystemExit(f"Expected exactly one dependency declaration, removed {n}")
+
+          gradle.write_text(text)
+          print("Removed published LiteRT-LM AAR dependency.")
+          PY
+
+      - name: Patch LiteRT-LM WORKSPACE (Rust toolchain for ARM32)
+        if: steps.chk.outputs.need_build == 'true'
+        working-directory: LiteRT-LM
+        run: |
+          set -e
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("WORKSPACE")
+          t = p.read_text()
+          t = t.replace(
+              '"aarch64-linux-android",\n        "aarch64-apple-ios",',
+              '"aarch64-linux-android",\n        "armv7-linux-androideabi",\n        "aarch64-apple-ios",',
+              1,
+          )
+          t = t.replace(
+              'SUPPORTED_PLATFORM_TRIPLES + [\n        "x86_64-linux-android",\n    ]',
+              'SUPPORTED_PLATFORM_TRIPLES + [\n        t for t in ["armv7-linux-androideabi", "x86_64-linux-android"] if t not in SUPPORTED_PLATFORM_TRIPLES\n    ]',
+              1,
+          )
+          p.write_text(t)
+          PY
+          grep -n "armv7-linux-androideabi" WORKSPACE
+          test "$(grep -c armv7-linux-androideabi WORKSPACE)" -ge 2
+
+      - name: Write helper patch (Gemma constraint provider stub, last-resort fallback)
+        if: steps.chk.outputs.need_build == 'true'
+        run: |
+          cat > /tmp/patch_fst_stub.py <<'PY'
+          # The prebuilt libGemmaModelConstraintProvider.so does not exist for 32-bit ARM,
+          # so the BUILD select() resolves to nothing and the linker fails.
+          # This adds a tiny stub implementation as the select() default.
+          from pathlib import Path
+
+          d = Path("runtime/components/constrained_decoding")
+          stub = "\n".join([
+              "#include <cstdio>",
+              'extern "C" {',
+              "void* LiteRtLmGemmaModelConstraintProvider_Create(...) {",
+              '  fprintf(stderr, "[LiteRT-LM] Gemma constraint provider is stubbed on ARM32\\n");',
+              "  return nullptr;",
+              "}",
+              "void LiteRtLmGemmaModelConstraintProvider_Destroy(void*) {}",
+              "void* LiteRtLmGemmaModelConstraintProvider_CreateConstraintFromTools(...) {",
+              "  return nullptr;",
+              "}",
+              "}  // extern C",
+              "",
+          ])
+          (d / "gemma_model_constraint_provider_stub.cc").write_text(stub)
+
+          b = d / "BUILD"
+          t = b.read_text()
+          if "gemma_model_constraint_provider_stub.cc" in t:
+              print("stub already wired")
+          else:
+              i = t.index('name = "gemma_model_constraint_provider_shared_lib"')
+              key = '"//conditions:default": [],'
+              j = t.index(key, i)
+              t = t[:j] + '"//conditions:default": ["gemma_model_constraint_provider_stub.cc"],' + t[j + len(key):]
+              b.write_text(t)
+              print("stub wired into BUILD")
+          PY
+
+      - name: Build LiteRT-LM JNI (auto-patch + NDK fallbacks)
+        id: build
+        if: steps.chk.outputs.need_build == 'true'
+        working-directory: LiteRT-LM
+        run: |
+          cat > /tmp/build_litert.sh <<'EOS'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          TARGET="//kotlin/java/com/google/ai/edge/litertlm/jni:litertlm_jni"
+          # NDK 25 is left out on purpose: its libc++ has no <ranges> (needed by the cxx crate).
+          NDKS=("28.2.13676358" "27.2.12479018" "26.3.11579264")
+          MAX_TRIES_PER_NDK=4
+          DEADLINE=$((200 * 60))
+          START=$SECONDS
+          LOG=/tmp/bazel.log
+          ATTEMPT=/tmp/attempt.log
+          ERRS=/tmp/errs.log
+          : > "$LOG"
+          : > "$ERRS"
+
+          DISK_CACHE="$HOME/.cache/bazel-disk"
+          REPO_CACHE="$HOME/.cache/bazel-repo"
+          mkdir -p "$DISK_CACHE" "$REPO_CACHE"
+
+          declare -A APPLIED
+          EXTRA=()
+          NET_RETRIES=0
+          BINDGEN_ON=0
+          STOP_ALL=0
+
+          SDKM="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          export LIBCLANG_PATH="$(dirname "$(find /usr/lib -name 'libclang*.so*' 2>/dev/null | head -1)" 2>/dev/null || true)"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH"
+
+          # ---------- proactive Rust filters (applied before the first build) ----------
+          flag_exists() { bazel query "$1" >/dev/null 2>&1; }
+
+          add_proactive_rust_flags() {
+            # Third-party crates must never fail on lints (Cargo does the same for dependencies).
+            local lbl
+            for lbl in "@rules_rust//rust/settings:extra_rustc_flag" "@rules_rust//:extra_rustc_flag"; do
+              if flag_exists "$lbl"; then
+                EXTRA+=("--$lbl=--cap-lints=allow")
+                echo ">>> proactive: $lbl --cap-lints=allow"
+                break
+              fi
+            done
+            for lbl in "@rules_rust//rust/settings:extra_exec_rustc_flag" "@rules_rust//:extra_exec_rustc_flag"; do
+              if flag_exists "$lbl"; then
+                EXTRA+=("--$lbl=--cap-lints=allow")
+                echo ">>> proactive: $lbl --cap-lints=allow"
+                break
+              fi
+            done
+          }
+
+          install_ndk() {
+            local v="$1"
+            if [ -d "$ANDROID_HOME/ndk/$v" ]; then return 0; fi
+            echo ">>> installing NDK $v"
+            yes | "$SDKM" --install "ndk;$v" >/tmp/sdkmanager.log 2>&1 || true
+            [ -d "$ANDROID_HOME/ndk/$v" ]
+          }
+
+          run_build() {
+            local ndk_home="$1"
+            export ANDROID_NDK_HOME="$ndk_home"
+            # LITERT_LM_FST_CONSTRAINTS_DISABLED=1: the Gemma FST constraint provider only ships
+            # prebuilt for arm64/x86_64/desktop. This makes the Gemma data processors use the
+            # LLGuidance path instead, so no prebuilt library is needed on ARM32.
+            local args=(--config=android_arm -c opt
+              --define=LITERT_LM_FST_CONSTRAINTS_DISABLED=1
+              --disk_cache="$DISK_CACHE"
+              --repository_cache="$REPO_CACHE"
+              --repo_env=CARGO_BAZEL_REPIN=1
+              --repo_env=ANDROID_NDK_HOME="$ndk_home"
+              --action_env=LIBCLANG_PATH="$LIBCLANG_PATH")
+            if [ "$BINDGEN_ON" = "1" ]; then
+              args+=("--action_env=BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi=--target=armv7-linux-androideabi29 --sysroot=$ndk_home/toolchains/llvm/prebuilt/linux-x86_64/sysroot")
+            fi
+            # Android 10 (API 29) libc does not export the ARM32 unwinder (_Unwind_*, added in
+            # Android 11). Link the NDK's static libunwind and hide its symbols.
+            local unwind_a
+            unwind_a="$(find "$ndk_home/toolchains/llvm/prebuilt/linux-x86_64" -name libunwind.a 2>/dev/null | grep -E '/arm/|arm-linux-androideabi' | grep -v -E 'aarch64|arm64' | head -1)"
+            if [ -n "$unwind_a" ]; then
+              echo ">>> static unwinder: $unwind_a"
+              args+=("--linkopt=-Wl,--whole-archive,$unwind_a,--no-whole-archive" "--linkopt=-Wl,--exclude-libs,libunwind.a")
+            else
+              echo "!!! libunwind.a for ARM32 not found in this NDK; the .so will need Android 11+"
+            fi
+            args+=("${EXTRA[@]}")
+            echo ">>> bazel build ${args[*]} $TARGET"
+            timeout 150m bazel build "${args[@]}" --curses=no --color=no \
+              --show_progress_rate_limit=30 --progress_report_interval=60 \
+              "$TARGET" 2>&1 | tee "$ATTEMPT"
+            local rc=${PIPESTATUS[0]}
+            cat "$ATTEMPT" >> "$LOG"
+            return $rc
+          }
+
+          # Only real error lines (+3 lines of context) are used for matching, so normal
+          # progress lines such as "Compiling Rust bin bindgen" can never trigger a filter.
+          extract_errors() {
+            grep -E -A3 "^ERROR|error:|error\[E|fatal error|undefined symbol|panicked at|Traceback|FATAL" "$ATTEMPT" > "$ERRS" 2>/dev/null || : > "$ERRS"
+          }
+
+          # ---------- reactive filters: read the errors, apply a known fix, return 0 if something changed ----------
+          apply_filters() {
+            local f="$ERRS" changed=1
+            extract_errors
+
+            if grep -qE "undefined symbol: LiteRtLmGemma" "$f" && [ -z "${APPLIED[fststub]:-}" ]; then
+              APPLIED[fststub]=1; changed=0
+              echo ">>> FILTER fststub: constraint provider still missing, wiring a stub implementation into BUILD"
+              python3 /tmp/patch_fst_stub.py
+            fi
+
+            if grep -qE "No matching toolchains found for types @@?rules_rust//rust:toolchain_type" "$f" && [ -z "${APPLIED[rusttc]:-}" ]; then
+              APPLIED[rusttc]=1; changed=0
+              echo ">>> FILTER rusttc: missing Rust toolchain, re-checking WORKSPACE triples + enabling resolution debug"
+              grep -n "armv7-linux-androideabi" WORKSPACE || echo "!!! WORKSPACE has no armv7 triple"
+              EXTRA+=("--toolchain_resolution_debug=@@rules_rust//rust:toolchain_type")
+            fi
+
+            if grep -qiE "Digests do not match|lockfile.*(out of date|stale|mismatch)|Please re-?pin|cargo-bazel-lock" "$f" && [ -z "${APPLIED[repin]:-}" ]; then
+              APPLIED[repin]=1; changed=0
+              echo ">>> FILTER repin: re-pinning crate_index"
+              CARGO_BAZEL_REPIN=1 bazel sync --only=crate_index --repo_env=CARGO_BAZEL_REPIN=1 >>"$LOG" 2>&1 || true
+            fi
+
+            if grep -qE "undefined reference to .?(__atomic_|__sync_)|cannot find -latomic" "$f" && [ -z "${APPLIED[atomic]:-}" ]; then
+              APPLIED[atomic]=1; changed=0
+              echo ">>> FILTER atomic: linking libatomic"
+              EXTRA+=(--linkopt=-latomic)
+            fi
+
+            if grep -qiE "OutOfMemoryError|Cannot allocate memory|signal 9|exit(ed)? (with )?(code )?137" "$f" && [ -z "${APPLIED[oom]:-}" ]; then
+              APPLIED[oom]=1; changed=0
+              echo ">>> FILTER oom: reducing parallelism"
+              EXTRA+=(--jobs=2 "--local_ram_resources=HOST_RAM*.7")
+            fi
+
+            if grep -qE "No space left on device" "$f" && [ -z "${APPLIED[disk]:-}" ]; then
+              APPLIED[disk]=1; changed=0
+              echo ">>> FILTER disk: cleaning outputs"
+              bazel clean >>"$LOG" 2>&1 || true
+              sudo rm -rf /usr/local/lib/android/sdk/system-images /opt/hostedtoolcache 2>/dev/null || true
+              df -h
+            fi
+
+            if grep -qiE "Unable to find libclang|couldn't find any valid shared libraries matching|stddef\.h' file not found" "$f" && [ -z "${APPLIED[bindgen]:-}" ]; then
+              APPLIED[bindgen]=1; changed=0; BINDGEN_ON=1
+              echo ">>> FILTER bindgen: giving bindgen the NDK sysroot for the ARM32 target only"
+            fi
+
+            if grep -qiE "Connection (reset|refused|timed out)|Read timed out|Error downloading|503 Service|502 Bad Gateway|Premature EOF|Tunnel connection failed" "$f" && [ "$NET_RETRIES" -lt 3 ]; then
+              NET_RETRIES=$((NET_RETRIES + 1)); changed=0
+              echo ">>> FILTER network: transient download error, retry $NET_RETRIES/3"
+              sleep 20
+            fi
+
+            # Rust code that is genuinely wrong for 32-bit cannot be auto-fixed: say so clearly.
+            if grep -qE "error\[E0308\]|error\[E0080\]|literal out of range for .usize.|mismatched types" "$f"; then
+              echo "!!! 32-BIT RUST SOURCE ERROR (needs a manual patch). First errors:"
+              head -40 "$f"
+            fi
+
+            return $changed
+          }
+
+          # A different NDK only helps when the error is about the toolchain itself.
+          ndk_related() {
+            grep -qE "file not found|[Uu]nsupported NDK|NDK.*(not found|unsupported|too old|too new)|clang: error: (unknown|unsupported)|error: unknown argument|undefined symbol: (_ZNSt|std::)" "$ERRS"
+          }
+
+          find_so() {
+            local f SO=""
+            for f in $(find -L bazel-bin/kotlin -type f -name "*litertlm_jni*" ! -name "*.params" ! -path "*runfiles*" 2>/dev/null); do
+              if file "$f" | grep -q "ELF 32-bit.*ARM"; then SO="$f"; break; fi
+            done
+            if [ -z "$SO" ]; then
+              for f in $(find -L bazel-bin -type f -name "*.so" -size +1M 2>/dev/null); do
+                if file "$f" | grep -q "ELF 32-bit.*ARM"; then SO="$f"; break; fi
+              done
+            fi
+            echo "$SO"
+          }
+
+          # ---------- main: NDK fallback loop ----------
+          FIRST=1
+          for V in "${NDKS[@]}"; do
+            if (( SECONDS - START > DEADLINE )); then echo "!!! time budget used up"; break; fi
+            if ! install_ndk "$V"; then echo "!!! NDK $V unavailable, skipping"; continue; fi
+            NDK_HOME="$ANDROID_HOME/ndk/$V"
+            echo "=================== NDK $V ==================="
+            export ANDROID_NDK_HOME="$NDK_HOME"
+
+            if [ "$FIRST" = "1" ]; then add_proactive_rust_flags; FIRST=0; fi
+            if [ "$V" != "${NDKS[0]}" ]; then bazel shutdown >/dev/null 2>&1 || true; bazel clean >/dev/null 2>&1 || true; fi
+
+            for ((i = 1; i <= MAX_TRIES_PER_NDK; i++)); do
+              if (( SECONDS - START > DEADLINE )); then break; fi
+              echo "--- NDK $V, attempt $i ---"
+              if run_build "$NDK_HOME"; then
+                SO="$(find_so)"
+                if [ -n "$SO" ]; then
+                  echo "Selected: $SO"; ls -lh "$SO"; file "$SO"
+                  echo "--- NEEDED libraries ---"; readelf -d "$SO" | grep NEEDED || true
+                  BAD="$(readelf --dyn-syms -W "$SO" | awk '$7=="UND" && $5=="GLOBAL"' | grep -E '@LIBC_(R|S|T|U|V|W)( |$)' || true)"
+                  if [ -n "$BAD" ]; then
+                    echo "!!! this .so needs libc symbols from Android 11+ and would crash on Android 10:"
+                    echo "$BAD"
+                    STOP_ALL=1
+                    break 2
+                  fi
+                  mkdir -p /tmp/armeabi-v7a
+                  cp -f "$SO" /tmp/armeabi-v7a/liblitertlm_jni.so
+                  echo "$V" > /tmp/ndk-used.txt
+                  git rev-parse HEAD > /tmp/litert-lm-sha.txt 2>/dev/null || true
+                  find -L bazel-bin/kotlin -type f -name "*litertlm_jni*" > /tmp/all-so.txt 2>/dev/null || true
+                  echo "SUCCESS with NDK $V"
+                  exit 0
+                fi
+                echo "!!! build succeeded but no 32-bit ARM .so found"
+                find -L bazel-bin -type f -name "*.so" | head -20 > /tmp/all-so.txt
+                break
+              fi
+              echo "!!! build failed (NDK $V, attempt $i). Last lines:"
+              grep -E "^ERROR" "$ATTEMPT" | head -15 || true
+              tail -n 15 "$ATTEMPT"
+              if ! apply_filters; then
+                if ndk_related; then
+                  echo ">>> no filter matched and the error looks NDK-related, trying the next NDK"
+                else
+                  echo "!!! no filter matched and the error is NOT NDK-related; other NDKs would fail the same way, stopping"
+                  STOP_ALL=1
+                fi
+                break
+              fi
+            done
+            if [ "$STOP_ALL" = "1" ]; then break; fi
+          done
+
+          echo "=================== ALL ATTEMPTS FAILED ==================="
+          grep -E "^ERROR" "$LOG" | tail -30
+          exit 1
+          EOS
+          chmod +x /tmp/build_litert.sh
+          /tmp/build_litert.sh
+
+      - name: Stop Bazel before caching
+        if: always() && steps.chk.outputs.need_build == 'true'
+        working-directory: LiteRT-LM
+        run: bazel shutdown || true
+
+      - name: Save Bazel caches (even when the build failed)
+        if: always() && steps.chk.outputs.need_build == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/bazel-disk
+            ~/.cache/bazel-repo
+          key: bazel-arm32-v2-${{ github.run_id }}
+
+      - name: Stage .so into the repo folder
+        id: stage
+        if: success() && steps.chk.outputs.need_build == 'true'
+        run: |
+          set -e
+          V="$(cat /tmp/ndk-used.txt)"
+          STRIP="$ANDROID_HOME/ndk/$V/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          DEST=self/prebuilt/armeabi-v7a
+          mkdir -p /tmp/so-artifacts "$DEST"
+
+          cp -f /tmp/armeabi-v7a/liblitertlm_jni.so /tmp/so-artifacts/liblitertlm_jni.unstripped.so
+          cp -f /tmp/armeabi-v7a/liblitertlm_jni.so "$DEST/liblitertlm_jni.so"
+          rm -f "$DEST/libunwindshim.so"
+
+          # Strip debug info so the file is small enough to live in git.
+          if [ -x "$STRIP" ]; then
+            "$STRIP" --strip-unneeded "$DEST/liblitertlm_jni.so" || true
+            if ! file "$DEST/liblitertlm_jni.so" | grep -q "ELF 32-bit.*ARM"; then
+              echo "strip damaged the file, using the unstripped copy"
+              cp -f /tmp/armeabi-v7a/liblitertlm_jni.so "$DEST/liblitertlm_jni.so"
+            fi
+          fi
+
+          {
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "ndk=$V"
+            echo "litert_lm_sha=$(cat /tmp/litert-lm-sha.txt 2>/dev/null || echo unknown)"
+            echo "gallery_sha=$(git -C gallery rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo "note=FST constraints disabled (LLGuidance path); see attempt log if a stub was used"
+            echo "unwinder=static libunwind (Android 10 compatible)"
+          } > "$DEST/BUILD_INFO.txt"
+          cp -f "$DEST/BUILD_INFO.txt" /tmp/so-artifacts/
+
+          ls -lh "$DEST" /tmp/so-artifacts
+          SIZE=$(stat -c%s "$DEST/liblitertlm_jni.so")
+          if [ "$SIZE" -gt 95000000 ]; then
+            echo "::warning::.so is over 95 MB, too big for a normal git push. It is kept as a workflow artifact only."
+            echo "commit=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "commit=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload .so artifact (safety copy)
+        if: success() && steps.chk.outputs.need_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblitertlm_jni-armeabi-v7a
+          path: /tmp/so-artifacts/*
+          retention-days: 30
+
+      - name: Commit saved .so to repo
+        if: success() && steps.chk.outputs.need_build == 'true' && steps.stage.outputs.commit == 'true'
+        continue-on-error: true
+        working-directory: self
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f prebuilt/armeabi-v7a
+          if git diff --cached --quiet; then
+            echo "Saved .so is already up to date"
+            exit 0
+          fi
+          git commit -m "Save ARM32 liblitertlm_jni.so (NDK $(cat /tmp/ndk-used.txt))"
+          for i in 1 2 3; do
+            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then
+              echo "Pushed prebuilt/armeabi-v7a/liblitertlm_jni.so"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::Could not push the .so to the repo; use the liblitertlm_jni-armeabi-v7a artifact instead."
+          exit 1
+
+      - name: Free Bazel space
+        if: always() && steps.chk.outputs.need_build == 'true'
+        working-directory: LiteRT-LM
+        run: |
+          bazel clean --expunge || true
+          rm -rf ~/.cache/bazel ~/.cache/bazel-disk ~/.cache/bazel-repo || true
+          df -h
+
+      - name: Repair saved .so (no Bazel - static unwinder shim)
+        id: repair
+        if: steps.chk.outputs.need_repair == 'true'
+        env:
+          NDK_HOME: ${{ steps.pre.outputs.ndk_home }}
+          UNW_A: ${{ steps.pre.outputs.unwind_a }}
+        run: |
+          set -euo pipefail
+          pip install --quiet --break-system-packages patchelf || pip install --quiet patchelf
+          patchelf --version
+          DEST=self/prebuilt/armeabi-v7a
+          SO="$DEST/liblitertlm_jni.so"
+          LLVM="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          CLANG="$LLVM/bin/armv7a-linux-androideabi29-clang"
+          test -x "$CLANG"
+          W=/tmp/repair
+          mkdir -p "$W" /tmp/so-artifacts
+          cp -f "$SO" "$W/original.so"
+          cp -f "$SO" /tmp/so-artifacts/liblitertlm_jni.before-repair.so
+
+          # 1) what the saved .so still needs from Android 11+ libc
+          mapfile -t SYMS < <(readelf --dyn-syms -W "$W/original.so" | awk '$7=="UND" && $5=="GLOBAL"' | grep -E '@LIBC_(R|S|T|U|V|W)( |$)' | awk '{print $8}' | sed 's/@.*//' | sort -u)
+          echo "Symbols to take over (${#SYMS[@]}): ${SYMS[*]}"
+          test "${#SYMS[@]}" -gt 0
+
+          # 2) a tiny library = the NDK's static unwinder + one exported forwarding stub per function.
+          #    The unwinder's own symbols are hidden inside libunwind.a, so the stubs get new names
+          #    (__shim_Unwind_...) and simply branch to the hidden originals.
+          : > "$W/shim.c"
+          for s in "${SYMS[@]}"; do
+            printf '__attribute__((naked, visibility("default"))) void __shim%s(void) { __asm__ volatile(".hidden %s\\n\\tb %s"); }\n' "$s" "$s" "$s" >> "$W/shim.c"
+          done
+          head -3 "$W/shim.c"
+          "$CLANG" -shared -fPIC -o "$W/libunwindshim.so" -Wl,-soname,libunwindshim.so "$W/shim.c" "$UNW_A"
+          file "$W/libunwindshim.so"
+          echo "--- shim NEEDED:"; readelf -d "$W/libunwindshim.so" | grep NEEDED || true
+          echo "--- unwinder symbols in the shim:"
+          readelf -sW "$W/libunwindshim.so" | grep -E "shim_Unwind_(Backtrace|Resume)|__shim__?_?gnu_unwind_frame|[^_]Unwind_Resume" | head -8 || true
+
+          # 3) the shim must export every stub
+          for s in "${SYMS[@]}"; do
+            readelf --dyn-syms -W "$W/libunwindshim.so" | awk -v s="__shim$s" '$7!="UND" && $8==s {f=1} END{exit !f}' || { echo "::error::the shim does not export __shim$s"; exit 1; }
+          done
+
+          # 4) patch the saved .so: drop the Android 11 version tag, then point it at the stubs
+          : > "$W/rename.map"
+          for s in "${SYMS[@]}"; do echo "$s __shim$s" >> "$W/rename.map"; done
+          cp -f "$W/original.so" "$W/patched.so"
+          for s in "${SYMS[@]}"; do patchelf --clear-symbol-version "$s" "$W/patched.so"; done
+          patchelf --rename-dynamic-symbols "$W/rename.map" "$W/patched.so"
+          patchelf --add-needed libunwindshim.so "$W/patched.so"
+
+          # 4) verify
+          file "$W/patched.so" | grep -q "ELF 32-bit.*ARM"
+          if readelf --dyn-syms -W "$W/patched.so" | awk '$7=="UND" && $5=="GLOBAL"' | grep -E '@LIBC_(R|S|T|U|V|W)( |$)'; then
+            echo "::error::the patched .so still needs Android 11+ libc symbols"
+            exit 1
+          fi
+          readelf -d "$W/patched.so" | grep NEEDED
+          readelf -d "$W/patched.so" | grep -q "libunwindshim.so"
+          if readelf --dyn-syms -W "$W/patched.so" | awk '$7=="UND"' | grep -E ' (_Unwind_|__gnu_unwind_frame)'; then
+            echo "::error::the patched .so still references the original unwinder names"
+            exit 1
+          fi
+          test "$(readelf --dyn-syms -W "$W/patched.so" | awk '$7=="UND" && $8 ~ /^__shim_/' | wc -l)" -eq "${#SYMS[@]}"
+
+          # 5) install into the repo folder (committed by the next step)
+          cp -f "$W/patched.so" "$SO"
+          cp -f "$W/libunwindshim.so" "$DEST/libunwindshim.so"
+          {
+            echo "repaired_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "repair=patchelf: _Unwind_* now come from libunwindshim.so (static NDK libunwind), Android 10 compatible"
+            echo "repair_unwinder=$UNW_A"
+          } >> "$DEST/BUILD_INFO.txt"
+          cp -f "$DEST/BUILD_INFO.txt" "$DEST/libunwindshim.so" /tmp/so-artifacts/
+          ls -lh "$DEST"
+
+      - name: Upload repaired .so (safety copy)
+        if: steps.chk.outputs.need_repair == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblitertlm_jni-armeabi-v7a-repaired
+          path: /tmp/so-artifacts/*
+          retention-days: 30
+
+      - name: Commit repaired .so to repo
+        if: steps.chk.outputs.need_repair == 'true'
+        continue-on-error: true
+        working-directory: self
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f prebuilt/armeabi-v7a
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit"
+            exit 0
+          fi
+          git commit -m "Repair ARM32 liblitertlm_jni.so for Android 10 (static unwinder shim)"
+          for i in 1 2 3; do
+            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then
+              echo "Pushed repaired prebuilt/armeabi-v7a"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::Could not push; use the liblitertlm_jni-armeabi-v7a-repaired artifact instead."
+          exit 1
+
+      - name: Verify saved JNI source revision
+        run: |
+          set -euo pipefail
+          EXPECTED="${{ steps.api_revision.outputs.sha }}"
+          ACTUAL="$(sed -n 's/^litert_lm_sha=//p' self/prebuilt/armeabi-v7a/BUILD_INFO.txt 2>/dev/null | head -1)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Saved JNI was built from SHA '$ACTUAL', but Kotlin API source is pinned to '$EXPECTED'. Rebuild the JNI with rebuild_so=true and this ref."
+            exit 1
+          fi
+
+      - name: Inject .so
+        run: |
+          set -e
+          SRC=self/prebuilt/armeabi-v7a/liblitertlm_jni.so
+          test -s "$SRC" || { echo "No liblitertlm_jni.so available"; exit 1; }
+          mkdir -p gallery/Android/src/app/src/main/jniLibs/armeabi-v7a
+          cp -f self/prebuilt/armeabi-v7a/*.so gallery/Android/src/app/src/main/jniLibs/armeabi-v7a/
+          ls -R gallery/Android/src/app/src/main/jniLibs/
+          cat self/prebuilt/armeabi-v7a/BUILD_INFO.txt 2>/dev/null || true
+          rm -rf LiteRT-LM || true
+          df -h
+
+      - name: Add crash-log recorder (diagnostic - copies the last crash log to the clipboard)
+        run: |
+          set -euo pipefail
+          SRC=gallery/Android/src/app/src/main
+          PKG_DIR="$SRC/java/com/google/ai/edge/gallery/crashlog"
+          mkdir -p "$PKG_DIR"
+          cat > "$PKG_DIR/CrashLogProvider.kt" <<'KT'
+          package com.google.ai.edge.gallery.crashlog
+
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.ContentProvider
+          import android.content.ContentValues
+          import android.content.Context
+          import android.database.Cursor
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import android.util.Log
+          import android.widget.Toast
+          import java.io.File
+
+          /**
+           * Diagnostic helper added by the ARM32 build workflow.
+           *
+           * It starts automatically with the app (as a ContentProvider), records uncaught Java
+           * exceptions, and on the next launch after any crash (Java or native) it saves the relevant
+           * logcat lines to last_crash_log.txt and copies them to the clipboard.
+           */
+          class CrashLogProvider : ContentProvider() {
+
+            override fun onCreate(): Boolean {
+              val ctx = context ?: return true
+              val app = ctx.applicationContext ?: ctx
+              try {
+                val dir = app.getExternalFilesDir(null) ?: app.filesDir
+                val previous = Thread.getDefaultUncaughtExceptionHandler()
+                Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                  try {
+                    File(dir, "java_crash.txt").writeText(Log.getStackTraceString(error))
+                  } catch (_: Throwable) {}
+                  if (previous != null) {
+                    previous.uncaughtException(thread, error)
+                  }
+                }
+                Thread { collect(app, dir) }.start()
+              } catch (_: Throwable) {}
+              return true
+            }
+
+            private fun readLogcat(): List<String> {
+              return try {
+                val proc =
+                  ProcessBuilder("logcat", "-b", "main,crash", "-d", "-v", "threadtime", "-t", "6000")
+                    .redirectErrorStream(true)
+                    .start()
+                val lines = proc.inputStream.bufferedReader().readLines()
+                proc.destroy()
+                lines
+              } catch (_: Throwable) {
+                emptyList()
+              }
+            }
+
+            private fun collect(app: Context, dir: File) {
+              try {
+                val markers =
+                  Regex(
+                    "FATAL EXCEPTION|Fatal signal|SIGSEGV|SIGABRT|SIGILL|SIGBUS|SIGFPE|" +
+                      "JNI DETECTED ERROR|UnsatisfiedLinkError|NoSuchFieldError|NoSuchMethodError|" +
+                      "NoClassDefFoundError|OutOfMemoryError|Abort message"
+                  )
+                val lines = readLogcat()
+                var last = -1
+                for (i in lines.indices) {
+                  if (markers.containsMatchIn(lines[i])) last = i
+                }
+                val javaFile = File(dir, "java_crash.txt")
+                val javaCrash = if (javaFile.exists()) javaFile.readText() else ""
+                if (last < 0 && javaCrash.isEmpty()) return
+
+                val markerText = if (last >= 0) lines[last] else javaCrash.take(200)
+                val signature = (markerText + javaCrash.length).hashCode().toString()
+                val reportedFile = File(dir, "last_reported_marker.txt")
+                if (reportedFile.exists() && reportedFile.readText() == signature) return
+
+                val from = if (last >= 0) maxOf(0, last - 150) else 0
+                val to = if (last >= 0) minOf(lines.size, last + 60) else 0
+                val sb = StringBuilder()
+                sb.append("device: ")
+                  .append(Build.MANUFACTURER)
+                  .append(' ')
+                  .append(Build.MODEL)
+                  .append(", android ")
+                  .append(Build.VERSION.SDK_INT)
+                  .append(", abis ")
+                  .append(Build.SUPPORTED_ABIS.joinToString())
+                  .append('\n')
+                if (javaCrash.isNotEmpty()) {
+                  sb.append("---- java crash ----\n").append(javaCrash.take(6000)).append('\n')
+                }
+                sb.append("---- logcat around the last crash marker ----\n")
+                for (i in from until to) {
+                  sb.append(lines[i]).append('\n')
+                }
+                val text = sb.toString()
+
+                File(dir, "last_crash_log.txt").writeText(text)
+                reportedFile.writeText(signature)
+                javaFile.delete()
+
+                Handler(Looper.getMainLooper()).post {
+                  try {
+                    val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("crash log", text.takeLast(20000)))
+                    Toast.makeText(
+                        app,
+                        "Crash log copied to clipboard. Paste it into the chat.",
+                        Toast.LENGTH_LONG,
+                      )
+                      .show()
+                  } catch (_: Throwable) {}
+                }
+              } catch (_: Throwable) {}
+            }
+
+            override fun query(
+              uri: Uri,
+              projection: Array<String>?,
+              selection: String?,
+              selectionArgs: Array<String>?,
+              sortOrder: String?,
+            ): Cursor? = null
+
+            override fun getType(uri: Uri): String? = null
+
+            override fun insert(uri: Uri, values: ContentValues?): Uri? = null
+
+            override fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?): Int = 0
+
+            override fun update(
+              uri: Uri,
+              values: ContentValues?,
+              selection: String?,
+              selectionArgs: Array<String>?,
+            ): Int = 0
+          }
+          KT
+          python3 - "$SRC/AndroidManifest.xml" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          t = p.read_text()
+          PROVIDER = '        <provider android:name="com.google.ai.edge.gallery.crashlog.CrashLogProvider" android:authorities="${applicationId}.crashlog" android:exported="false" />'
+          if "CrashLogProvider" in t:
+              print("provider already registered")
+          else:
+              assert "</application>" in t, "no </application> in manifest"
+              t = t.replace("</application>", PROVIDER + "\n    </application>", 1)
+              p.write_text(t)
+              print("registered CrashLogProvider")
+          PY
+          grep -n "CrashLogProvider" "$SRC/AndroidManifest.xml"
+          test -s "$PKG_DIR/CrashLogProvider.kt"
+
+      - name: Patch Android 12+ API calls that crash on Android 10
+        working-directory: gallery/Android/src/app/src/main/java/com/google/ai/edge/gallery
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def patch(path, fn):
+              p = Path(path)
+              if not p.exists():
+                  print(f"!! missing: {path}")
+                  return
+              old = p.read_text()
+              new = fn(old)
+              if new == old:
+                  print(f"!! nothing to change in {path}")
+              else:
+                  p.write_text(new)
+                  print(f"patched {path}")
+
+          SAFE_SOC = '(if (android.os.Build.VERSION.SDK_INT >= 31) android.os.Build.SOC_MODEL else "")'
+
+          # Build.SOC_MODEL does not exist before Android 12 (NoSuchFieldError when read).
+          patch("common/HardwareUtils.kt",
+                lambda t: t.replace("socModel: String = Build.SOC_MODEL,", "socModel: String = " + SAFE_SOC + ","))
+
+          # UiModeManager.setApplicationNightMode is Android 12+ (theme switch in Settings).
+          patch("ui/home/SettingsDialog.kt",
+                lambda t: re.sub(r"(\s)uiModeManager\.setApplicationNightMode\(([^)]*)\)",
+                                 r"\1if (android.os.Build.VERSION.SDK_INT >= 31) uiModeManager.setApplicationNightMode(\2)", t))
+
+          # Matrix.IDENTITY_MATRIX is Android 12+ (Scrapbook).
+          patch("customtasks/scrapbook/ScrapbookViewModel.kt",
+                lambda t: t.replace("Matrix.IDENTITY_MATRIX", "Matrix()"))
+          PY
+
+      - name: Build Gallery APK (Kotlin version auto-detection + retry)
+        id: gallery_build
+        working-directory: gallery/Android/src
+        env:
+          INITIAL_KOTLIN_VERSION: "2.2.21"
+        run: |
+          set -euo pipefail
+          cat > /tmp/build_gallery_with_kotlin_retry.sh <<'EOS'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          TOML="gradle/libs.versions.toml"
+          LOG="build.log"
+          INITIAL="${INITIAL_KOTLIN_VERSION:-2.2.21}"
+          META="/tmp/kotlin-plugin-metadata.xml"
+          VERSIONS=("$INITIAL")
+
+          set_catalog_version() {
+            local version="$1"
+            python3 - "$TOML" "$version" <<'PY'
+          from pathlib import Path
+          import re, sys
+          p = Path(sys.argv[1]); version = sys.argv[2]
+          t = p.read_text()
+          # These three are tied to the Kotlin compiler/plugin version in this catalog.
+          for key in ("kotlin", "serializationPlugin", "kotlinReflect"):
+              pattern = rf'(?m)^({key} = ")[^"]+(".*)$'.replace("{key}", key)
+              t, n = re.subn(pattern, rf'\g<1>{version}\g<2>', t, count=1)
+              if n != 1:
+                  raise SystemExit(f"Could not update catalog version key: {key}")
+          p.write_text(t)
+          PY
+          }
+
+          is_kotlin_failure() {
+            grep -Eqi \\
+              'Kotlin Gradle plugin|Kotlin compiler|compiled with an incompatible version of Kotlin|metadata binary version|Kotlin version.*(not supported|required|expected)|requires Kotlin|Compose Compiler.*Kotlin|KSP.*Kotlin|incompatible.*Kotlin' "$1"
+          }
+
+          extract_required_version() {
+            python3 - "$1" <<'PY'
+          import re, sys
+          text = open(sys.argv[1], errors="ignore").read()
+          patterns = [
+              r'requires? Kotlin(?: Gradle plugin)?(?: version)?[ :=]+([0-9]+\.[0-9]+\.[0-9]+)',
+              r'must use Kotlin(?: Gradle plugin)?(?: version)?[ :=]+([0-9]+\.[0-9]+\.[0-9]+)',
+              r'minimum Kotlin(?: version)?[ :=]+([0-9]+\.[0-9]+\.[0-9]+)',
+              r'Kotlin Gradle plugin version ([0-9]+\.[0-9]+\.[0-9]+)',
+          ]
+          for pattern in patterns:
+              matches = re.findall(pattern, text, re.I)
+              if matches:
+                  print(matches[-1]); raise SystemExit(0)
+          PY
+          }
+
+          discover_fallback_versions() {
+            # Query the Gradle Plugin Portal metadata rather than guessing future version numbers.
+            curl -fsSL --retry 2 \\
+              https://plugins.gradle.org/m2/org/jetbrains/kotlin/android/org.jetbrains.kotlin.android.gradle.plugin/maven-metadata.xml \\
+              -o "$META" || {{
+                printf '%s\\n' "2.3.0" "2.1.21"
+                return 0
+              }}
+            python3 - "$META" "$INITIAL" <<'PY'
+          import re, sys, xml.etree.ElementTree as ET
+          def key(v):
+              return tuple(int(x) for x in v.split("."))
+          root = ET.parse(sys.argv[1]).getroot()
+          initial = key(sys.argv[2])
+          versions = []
+          for node in root.findall(".//version"):
+              raw = (node.text or "").strip()
+              if re.fullmatch(r"\\d+\\.\\d+\\.\\d+", raw):
+                  versions.append((key(raw), raw))
+          higher = sorted((x for x in versions if x[0] > initial), reverse=True)
+          lower = sorted((x for x in versions if x[0] < initial), reverse=True)
+          if higher: print(higher[0][1])
+          if lower: print(lower[0][1])
+          PY
+          }
+
+          run_attempt() {
+            local version="$1"
+            echo "=================================================="
+            echo "Building Gallery with Kotlin $version"
+            echo "=================================================="
+            set_catalog_version "$version"
+            rm -f "$LOG"
+            ./gradlew :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee "$LOG"
+            return ${PIPESTATUS[0]}
+          }
+
+          # Attempt 1: the Gallery's original Kotlin version.
+          if run_attempt "$INITIAL"; then
+            echo "kotlin_version=$INITIAL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! is_kotlin_failure "$LOG"; then
+            echo "Build failed for a non-Kotlin reason. Kotlin version will not be changed."
+            exit 1
+          fi
+
+          REQUIRED="$(extract_required_version "$LOG" || true)"
+          if [ -n "$REQUIRED" ]; then
+            echo "Compiler/plugin explicitly requested Kotlin $REQUIRED"
+            VERSIONS+=("$REQUIRED")
+          else
+            echo "Kotlin-related failure did not name an exact required version."
+          fi
+
+          # Also discover one newer and one older stable version. This is useful
+          # if the explicit version is unavailable or exposes a second incompatibility.
+          echo "Checking stable Kotlin versions in the Gradle Plugin Portal."
+          while IFS= read -r candidate; do
+            [ -n "$candidate" ] && VERSIONS+=("$candidate")
+          done < <(discover_fallback_versions)
+
+          # Avoid duplicate retries and cap the build to three diagnostic retries.
+          declare -A SEEN=()
+          SEEN["$INITIAL"]=1
+          RETRIES=0
+          for version in "${VERSIONS[@]:1}"; do
+            [ -n "$version" ] || continue
+            [ -z "${SEEN[$version]:-}" ] || continue
+            SEEN["$version"]=1
+            RETRIES=$((RETRIES + 1))
+            if [ "$RETRIES" -gt 3 ]; then break; fi
+            if run_attempt "$version"; then
+              echo "kotlin_version=$version" >> "$GITHUB_OUTPUT"
+              echo "Build succeeded with Kotlin $version"
+              exit 0
+            fi
+            if ! is_kotlin_failure "$LOG"; then
+              echo "Retry failed for a non-Kotlin reason. Stopping version changes."
+              exit 1
+            fi
+            NEXT_REQUIRED="$(extract_required_version "$LOG" || true)"
+            if [ -n "$NEXT_REQUIRED" ] && [ -z "${SEEN[$NEXT_REQUIRED]:-}" ]; then
+              echo "New compiler diagnostic explicitly requires Kotlin $NEXT_REQUIRED"
+              VERSIONS+=("$NEXT_REQUIRED")
+            fi
+          done
+
+          echo "All Kotlin version attempts failed."
+          echo "Initial version: $INITIAL"
+          echo "Tried: ${!SEEN[*]}"
+          echo "The complete final compiler diagnostic is in build.log."
+          exit 1
+          EOS
+          chmod +x /tmp/build_gallery_with_kotlin_retry.sh
+          /tmp/build_gallery_with_kotlin_retry.sh
+
+          find app/build/outputs -name "*.apk" | tee /tmp/apk-paths.txt
+          APK="$(head -1 /tmp/apk-paths.txt)"
+          if [ -z "$APK" ]; then
+            echo "No APK under app/build/outputs; searching whole build dir:"
+            find app/build -iname "*.apk" 2>/dev/null | tee -a /tmp/apk-paths.txt
+            APK="$(tail -1 /tmp/apk-paths.txt)"
+          fi
+          test -n "$APK" || { echo "No APK produced"; exit 1; }
+          cp -f "$APK" /tmp/Gallery-Android10-armeabi-v7a.apk
+          ls -lh /tmp/Gallery-Android10-armeabi-v7a.apk
+
+      # Lists every call to an Android 12+ API (the build lowers minSdk to 29). Any of them that is not
+      # wrapped in a version check can crash on an Android 10 phone. Informational only.
+      - name: Lint - find Android 12+ API calls that crash on Android 10 (diagnostic)
+        continue-on-error: true
+        timeout-minutes: 35
+        working-directory: gallery/Android/src
+        run: |
+          set +e
+          cat > /tmp/newapi.init.gradle <<'GR'
+          allprojects {
+            afterEvaluate { p ->
+              if (p.plugins.hasPlugin('com.android.application')) {
+                try {
+                  p.android.lint {
+                    checkOnly.clear()
+                    checkOnly.add('NewApi')
+                    abortOnError = false
+                    checkDependencies = false
+                    checkReleaseBuilds = false
+                    textReport = true
+                    textOutput = p.layout.buildDirectory.file('reports/newapi.txt').get().asFile
+                    htmlReport = false
+                    xmlReport = false
+                    sarifReport = false
+                  }
+                } catch (Throwable t) {
+                  println("newapi init script failed: " + t)
+                }
+              }
+            }
+          }
+          GR
+          ./gradlew :app:lintDebug --init-script /tmp/newapi.init.gradle --no-daemon \
+            -Dorg.gradle.jvmargs=-Xmx4g 2>&1 | tail -n 40
+          REPORT=app/build/reports/newapi.txt
+          if [ -s "$REPORT" ]; then
+            cp -f "$REPORT" /tmp/newapi.txt
+            echo "=== NewApi findings (unguarded Android 12+ calls) ==="
+            grep -E "\[NewApi\]" "$REPORT" | sed 's#^.*/java/com/google/ai/edge/gallery/##' | sort -u | head -150
+          else
+            echo "No NewApi report was produced"
+            ls app/build/reports 2>/dev/null
+          fi
+
+      - name: Validate APK and JNI identity
+        run: |
+          set -euo pipefail
+          APK=/tmp/Gallery-Android10-armeabi-v7a.apk
+          unzip -l "$APK" | grep -E "lib/armeabi-v7a|lib/arm64" || true
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | grep -E "sdkVersion|native-code|package" || true
+          mkdir -p /tmp/apkcheck
+          unzip -p "$APK" lib/armeabi-v7a/liblitertlm_jni.so > /tmp/apkcheck/liblitertlm_jni.so
+          test -s /tmp/apkcheck/liblitertlm_jni.so
+          readelf -d /tmp/apkcheck/liblitertlm_jni.so | grep NEEDED || true
+          if readelf --dyn-syms -W /tmp/apkcheck/liblitertlm_jni.so | awk '$7=="UND" && $5=="GLOBAL"' | grep -E '@LIBC_(R|S|T|U|V|W)( |$)'; then
+            echo "::error::The packaged .so needs Android 11+ libc symbols and will crash on Android 10."
+            exit 1
+          fi
+          sha256sum self/prebuilt/armeabi-v7a/liblitertlm_jni.so /tmp/apkcheck/liblitertlm_jni.so
+          if [ -f self/prebuilt/armeabi-v7a/libunwindshim.so ]; then
+            unzip -l "$APK" | grep -q "lib/armeabi-v7a/libunwindshim.so" || {
+              echo "::error::libunwindshim.so is missing from the APK"
+              exit 1
+            }
+          fi
+          S=self/prebuilt/armeabi-v7a/liblitertlm_jni.so
+          A=/tmp/apkcheck/liblitertlm_jni.so
+          if cmp -s "$S" "$A"; then
+            echo "Packaged library is byte-identical to the saved one"
+          else
+            echo "Bytes differ (Gradle rewrote the file); comparing dependencies and symbols instead"
+            ls -l "$S" "$A"
+            diff <(readelf -d "$S" | grep -E 'NEEDED|SONAME' | sed 's/^ *0x[0-9a-f]* //') <(readelf -d "$A" | grep -E 'NEEDED|SONAME' | sed 's/^ *0x[0-9a-f]* //') || {
+              echo "::error::The packaged library has different dependencies than the saved ARM32 library."
+              exit 1
+            }
+            diff <(readelf --dyn-syms -W "$S" | awk 'NR>3{print $4, $5, ($7=="UND" ? "UND" : "DEF"), $8}' | sort) <(readelf --dyn-syms -W "$A" | awk 'NR>3{print $4, $5, ($7=="UND" ? "UND" : "DEF"), $8}' | sort) || {
+              echo "::error::The packaged library has different dynamic symbols than the saved ARM32 library."
+              exit 1
+            }
+            echo "Dependencies and dynamic symbols match the saved library"
+          fi
+          ls -lh "$APK"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gallery-Android10-armeabi-v7a
+          path: /tmp/Gallery-Android10-armeabi-v7a.apk
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            gallery/Android/src/build.log
+            /tmp/newapi.txt
+            /tmp/apk-paths.txt
+            /tmp/bazel.log
+            /tmp/attempt.log
+            /tmp/errs.log
+            /tmp/all-so.txt
+            /tmp/ndk-used.txt
+            /tmp/litert-lm-sha.txt
+            /tmp/sdkmanager.log
+            /tmp/kotlin-plugin-metadata.xml
+          if-no-files-found: ignore
