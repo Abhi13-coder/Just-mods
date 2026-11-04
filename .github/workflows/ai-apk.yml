@@ -533,7 +533,7 @@ jobs:
 
             - name: Build Gallery APK
         working-directory: gallery/Android/src
-        run: |
+  run: |
           set -eo pipefail
           chmod +x gradlew
           ./gradlew :app:assembleDebug \
