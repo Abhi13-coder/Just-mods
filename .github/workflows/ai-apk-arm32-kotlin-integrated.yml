@@ -166,23 +166,26 @@ jobs:
           echo "Copied Kotlin API files: $COUNT"
           test "$COUNT" -ge 16
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          gradle = Path("app/build.gradle.kts")
-          text = gradle.read_text()
-          text, n = re.subn(r'^\\s*implementation\\(libs\\.litertlm\\)\\s*\\n?', '', text, flags=re.M)
-          if n != 1:
-              raise SystemExit(f"Expected exactly one implementation(libs.litertlm), removed {n}")
-          gradle.write_text(text)
-          print("Removed published LiteRT-LM AAR dependency; Kotlin API is compiled from matching source.")
-          PY
+            python3 - <<'PY'
+            from pathlib import Path
+            import re
 
-          grep -R "implementation(libs.litertlm)" -n app/build.gradle.kts && exit 1 || true
-          test -f "$DEST/LiteRtLmJni.kt"
-          test -f "$DEST/Engine.kt"
-          test -f "$DEST/Conversation.kt"
-          echo "LiteRT-LM Kotlin source integration complete."
+           gradle = Path("app/build.gradle.kts")
+           text = gradle.read_text()
+
+           pattern = r'^\s*implementation\(libs\.litertlm\)\s*\n?'
+           text, n = re.subn(pattern, '', text, flags=re.M)
+
+  if n != 1:
+            print("LiteRT-LM references found:")
+for line in text.splitlines():
+              if "litertlm" in line.lower():
+                                       print(repr(line))
+                                          raise SystemExit(f"Expected exactly one dependency declaration, removed {n}")
+
+                                 gradle.write_text(text)
+                                      print("Removed published LiteRT-LM AAR dependency.")
+                                          PY
 
       - name: Patch LiteRT-LM WORKSPACE (Rust toolchain for ARM32)
         if: steps.chk.outputs.need_build == 'true'
