@@ -1,4 +1,4 @@
-name: Gallery Android10 ARM32
+name: 3Gallery Android10 ARM32
 
 on:
   workflow_dispatch:
