@@ -4541,6 +4541,111 @@ jobs:
           cd - >/dev/null
           for f in foundation/AuditLog foundation/PreviewSupport foundation/PreviewActivity foundation/AgentCenterActivity sandbox/ProcRegistry; do test -s "$BASE/$f.kt"; done
 
+      - name: Add credits screen (made by Abhi, Buy Me a Coffee, GitHub)
+        run: |
+          set -euo pipefail
+          SRC=gallery/Android/src/app/src/main
+          BASE="$SRC/java/com/google/ai/edge/gallery"
+          cat > "$BASE/foundation/CreditsActivity.kt" <<'KT'
+          package com.google.ai.edge.gallery.foundation
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          object Credits {
+            const val GITHUB = "https://github.com/Abhi13-coder"
+            const val COFFEE = "https://buymeacoffee.com/abhi13.coder"
+
+            fun open(ctx: Context, url: String) {
+              try {
+                val i = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ctx.startActivity(i)
+              } catch (_: Throwable) {}
+            }
+
+            fun show(ctx: Context) {
+              val i = Intent().setClassName(ctx.packageName, "com.google.ai.edge.gallery.foundation.CreditsActivity")
+              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+              ctx.startActivity(i)
+            }
+          }
+
+          class CreditsActivity : Activity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              val d = resources.displayMetrics.density
+              val pad = (24 * d).toInt()
+              val box = LinearLayout(this)
+              box.orientation = LinearLayout.VERTICAL
+              box.gravity = Gravity.CENTER
+              box.setPadding(pad, pad, pad, pad)
+              box.setBackgroundColor(0xFF0B0F14.toInt())
+
+              val title = TextView(this)
+              title.text = "Made by Abhi"
+              title.textSize = 28f
+              title.setTextColor(0xFFFFFFFF.toInt())
+              title.gravity = Gravity.CENTER
+              box.addView(title)
+
+              val sub = TextView(this)
+              sub.text = "Android 10 ARM32 build of AI Edge Gallery.\nFree and open. If it helps you, please support me."
+              sub.textSize = 15f
+              sub.setTextColor(0xFF8FA3B5.toInt())
+              sub.gravity = Gravity.CENTER
+              sub.setPadding(0, pad / 2, 0, pad)
+              box.addView(sub)
+
+              val coffee = Button(this)
+              coffee.text = "Buy me a coffee"
+              coffee.setOnClickListener { Credits.open(this, Credits.COFFEE) }
+              box.addView(coffee)
+
+              val gh = Button(this)
+              gh.text = "Visit my GitHub"
+              gh.setOnClickListener { Credits.open(this, Credits.GITHUB) }
+              box.addView(gh)
+
+              setContentView(box)
+            }
+          }
+          KT
+
+          python3 - "$SRC/AndroidManifest.xml" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          t = p.read_text()
+          xml = '        <activity android:name="com.google.ai.edge.gallery.foundation.CreditsActivity" android:label="About Abhi" android:exported="true" android:theme="@android:style/Theme.DeviceDefault.NoActionBar"><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity>'
+          if "CreditsActivity" not in t:
+              t = t.replace("</application>", xml + "\n    </application>", 1)
+          p.write_text(t)
+
+          # Button at the top of the Tools panel in chat
+          tp = Path("gallery/Android/src/app/src/main/java/com/google/ai/edge/gallery/foundation/ToolPanel.kt")
+          s = tp.read_text()
+          anchor = "val center = android.widget.Button(act)"
+          assert anchor in s, "ToolPanel.kt changed, patch needs updating"
+          add = ('val credit = android.widget.Button(act)\n'
+                 '    credit.text = "Made by Abhi - support / GitHub"\n'
+                 '    credit.setOnClickListener { Credits.show(act) }\n'
+                 '    box.addView(credit)\n'
+                 '    ')
+          if "Credits.show(act)" not in s:
+              s = s.replace(anchor, add + anchor, 1)
+          tp.write_text(s)
+          PY
+          grep -n "CreditsActivity" "$SRC/AndroidManifest.xml"
+          grep -n "Credits.show" "$BASE/foundation/ToolPanel.kt"
+
       - name: Patch Android 12+ API calls that crash on Android 10
         working-directory: gallery/Android/src/app/src/main/java/com/google/ai/edge/gallery
         run: |
