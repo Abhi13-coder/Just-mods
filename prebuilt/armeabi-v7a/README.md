@@ -61,12 +61,11 @@ What the workflow does:
 - About / Support screen with links to my GitHub and Buy Me a Coffee
 
 > Small models work best with few or no tools turned on.
+## GET THE APP
 
-## Get the app
+## Releases
 
-1. Open the **Actions** tab and select the latest successful **Gallery Android10 ARM32** run.
-2. Download the artifact `Gallery-Android10-armeabi-v7a` (artifacts are kept for 14 days).
-3. Unzip it, then install the `.apk`. Allow "Install unknown apps" if Android asks.
+**Download the latest APK:** [Latest ARM32 Release](https://github.com/Abhi13-coder/Just-mods/releases/latest)
 
 ## Build it yourself
 
