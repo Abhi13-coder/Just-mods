@@ -1,0 +1,137 @@
+
+name: Release Gallery ARM32 APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (example: v1.0.0)"
+        required: true
+        type: string
+      release_name:
+        description: "Release title"
+        required: true
+        default: "AI Edge Gallery ARM32 Edition"
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Find latest successful ARM32 build
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          RUNS=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/gallery-arm32.yml/runs?branch=main&status=success&per_page=1")
+
+          RUN_ID=$(echo "$RUNS" | jq -r '.workflow_runs[0].id // empty')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::No successful run found for gallery-arm32.yml"
+            exit 1
+          fi
+
+          echo "Latest successful build: $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Verify exact artifact exists
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ARTIFACTS=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${{ steps.build.outputs.run_id }}/artifacts")
+
+          ARTIFACT_ID=$(echo "$ARTIFACTS" | jq -r '
+            [.artifacts[]
+              | select(.name == "Gallery-Android10-armeabi-v7a")
+              | select(.expired == false)]
+            | sort_by(.created_at)
+            | last
+            | .id // empty
+          ')
+
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::Exact ARM32 APK artifact not found or expired."
+            exit 1
+          fi
+
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download selected build artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh run download "${{ steps.build.outputs.run_id }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "Gallery-Android10-armeabi-v7a" \
+            --dir release-assets
+
+          APK=$(find release-assets -type f -name "*.apk" | head -1)
+
+          if [ -z "$APK" ]; then
+            echo "::error::APK missing from downloaded artifact."
+            exit 1
+          fi
+
+          cp "$APK" Gallery-Android10-armeabi-v7a.apk
+          ls -lh Gallery-Android10-armeabi-v7a.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          name: ${{ inputs.release_name }}
+          target_commitish: main
+          generate_release_notes: true
+          body: |
+            # AI Edge Gallery · ARM32 Edition
+
+            Google's AI Edge Gallery rebuilt and extended for
+            **32-bit ARM (armeabi-v7a) Android 10 devices**.
+
+            ## Features
+            - LiteRT-LM native ARM32 integration
+            - Built-in Alpine Linux terminal
+            - Native ARM32 mod loader
+            - Agent tools, browser and web search
+            - Workspace and background jobs
+            - Agent activity log and STOP safety control
+            - Android 10 compatibility patches
+
+            ## Compatibility
+            - Architecture: ARM32 / armeabi-v7a
+            - Minimum Android: Android 10 (API 29)
+
+            ## Installation
+            1. Download the APK below.
+            2. Enable installation from unknown sources if requested.
+            3. Install and launch the application.
+
+            ## Build provenance
+            Source workflow: `gallery-arm32.yml`
+            Run ID: `${{ steps.build.outputs.run_id }}`
+            Artifact: `Gallery-Android10-armeabi-v7a`
+
+            ## Credits
+            ARM32 port, patches, tools and maintenance by Abhi.
+            Based on Google's open-source AI Edge Gallery and LiteRT-LM.
+            Unofficial project, not affiliated with Google.
+
+            Support: https://buymeacoffee.com/abhi13.coder
+          files: Gallery-Android10-armeabi-v7a.apk
+          fail_on_unmatched_files: true
+          make_latest: true

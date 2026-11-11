@@ -1,0 +1,98 @@
+name: Build APK
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Find project root (works even if the zip is nested)
+        shell: bash
+        run: |
+          set -e
+          echo "Repo layout:"; find . -maxdepth 4 -not -path './.git/*' -not -path './.git' | sort | head -n 80
+          # shallowest settings.gradle / settings.gradle.kts = project root
+          S="$(find . -maxdepth 8 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -not -path '*/.git/*' -not -path '*/build/*' -not -path '*/node_modules/*' | awk '{ print length($0) " " $0 }' | sort -n | head -n1 | cut -d' ' -f2-)"
+          if [ -z "$S" ]; then echo "ERROR: no settings.gradle found anywhere in the repo"; exit 1; fi
+          PROJECT_DIR="$(cd "$(dirname "$S")" && pwd)"
+          echo "Project root: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          # warn if the app module or sources are missing
+          APP="$(find "$PROJECT_DIR" -maxdepth 3 -type f -name build.gradle -path '*app*' | head -n1)"
+          [ -n "$APP" ] && echo "App module file: $APP" || echo "WARNING: app/build.gradle not found"
+          G="$(find "$PROJECT_DIR" -maxdepth 2 -type f -name gradlew | head -n1)"
+          [ -n "$G" ] && echo "gradlew: $G" || echo "gradlew: none (will use Gradle 8.13 from setup-gradle)"
+
+      - name: Find Android SDK and install packages
+        shell: bash
+        run: |
+          set -e
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            for d in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk /usr/lib/android-sdk "$HOME/Android/Sdk" "$HOME/android-sdk" /opt/android-sdk /opt/android; do
+              [ -n "$d" ] && [ -d "$d" ] || continue
+              F="$(find "$d" -type f -name sdkmanager -path '*bin*' 2>/dev/null | sort | head -n1)"
+              if [ -n "$F" ]; then SDKM="$F"; break; fi
+            done
+          fi
+          if [ -z "$SDKM" ]; then
+            SDKM="$(find / -type f -name sdkmanager -path '*bin*' 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$SDKM" ]; then
+            echo "ERROR: sdkmanager not found anywhere."
+            ls -la /usr/local/lib/android 2>/dev/null || true
+            echo "ANDROID_HOME=$ANDROID_HOME ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+            exit 1
+          fi
+          echo "sdkmanager: $SDKM"
+          SDK_ROOT="$(cd "$(dirname "$SDKM")/../../.." && pwd)"
+          if [ ! -d "$SDK_ROOT/platforms" ] && [ ! -d "$SDK_ROOT/build-tools" ] && [ -n "$ANDROID_HOME" ]; then SDK_ROOT="$ANDROID_HOME"; fi
+          echo "SDK root: $SDK_ROOT"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK_ROOT" > "$PROJECT_DIR/local.properties"
+          yes | "$SDKM" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
+          "$SDKM" --sdk_root="$SDK_ROOT" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          [ -d "$SDK_ROOT/platforms/android-35" ] || { echo "ERROR: platforms/android-35 missing"; ls "$SDK_ROOT/platforms"; exit 1; }
+          [ -d "$SDK_ROOT/build-tools/35.0.0" ] || { echo "ERROR: build-tools/35.0.0 missing"; ls "$SDK_ROOT/build-tools"; exit 1; }
+          echo "SDK OK"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          G="$(find . -maxdepth 2 -type f -name gradlew | head -n1)"
+          if [ -n "$G" ]; then
+            chmod +x "$G"
+            echo "Using $G"
+            "$G" assembleDebug --no-daemon --stacktrace
+          else
+            echo "No gradlew found, using gradle 8.13"
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/apk-out"
+          find "$PROJECT_DIR" -type f -name '*.apk' -path '*outputs*' -not -path '*androidTest*' -exec cp -v {} "$GITHUB_WORKSPACE/apk-out/" \;
+          ls -la "$GITHUB_WORKSPACE/apk-out"
+          [ -n "$(ls -A "$GITHUB_WORKSPACE/apk-out")" ] || { echo "ERROR: no APK produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenFX-debug-apk
+          path: apk-out/*.apk
+          if-no-files-found: error
