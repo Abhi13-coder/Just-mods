@@ -1,0 +1,86 @@
+name: Fetch Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      want:
+        description: "URL, ndk:r27c, cmdline-tools:11076708, platform-tools, github:owner/repo[:regex]"
+        required: true
+      mode:
+        description: "Where to host it"
+        type: choice
+        options: [auto, repo, release]
+        default: auto
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and download
+        env:
+          WANT: ${{ inputs.want }}
+          MODE: ${{ inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          G="https://dl.google.com/android/repository"
+          case "$WANT" in
+            ndk:*)            URL="$G/android-ndk-${WANT#ndk:}-linux.zip" ;;
+            cmdline-tools:*)  URL="$G/commandlinetools-linux-${WANT#cmdline-tools:}_latest.zip" ;;
+            platform-tools)   URL="$G/platform-tools-latest-linux.zip" ;;
+            github:*)
+              SPEC="${WANT#github:}"; R="${SPEC%%:*}"; PAT=".*"
+              [ "$SPEC" != "$R" ] && PAT="${SPEC#*:}"
+              URL=$(gh api "repos/$R/releases/latest" --jq "[.assets[]|select(.name|test(\"$PAT\"))][0].browser_download_url")
+              [ -z "$URL" ] && { echo "No matching asset in $R"; exit 1; } ;;
+            http*)            URL="$WANT" ;;
+            *) echo "Unknown request: $WANT"; exit 1 ;;
+          esac
+
+          mkdir -p dl && cd dl
+          FILE=$(basename "${URL%%\?*}")
+          echo "Downloading $URL"
+          curl -fL --retry 3 -o "$FILE" "$URL"
+          SIZE=$(stat -c%s "$FILE")
+          echo "Size: $SIZE bytes"
+
+          LIMIT=$((50*1024*1024))
+          if [ "$MODE" = "auto" ]; then
+            if [ "$SIZE" -le "$LIMIT" ]; then MODE=repo; else MODE=release; fi
+          fi
+          REPO="$GITHUB_REPOSITORY"
+
+          if [ "$MODE" = "repo" ]; then
+            [ "$SIZE" -gt $((95*1024*1024)) ] && { echo "Too big for repo. Use release."; exit 1; }
+            mkdir -p ../claude/pkgs
+            mv "$FILE" ../claude/pkgs/
+            sha256sum "../claude/pkgs/$FILE" > "../claude/pkgs/$FILE.sha256"
+            cd ..
+            LINK="https://raw.githubusercontent.com/$REPO/HEAD/claude/pkgs/$FILE"
+          else
+            TAG="pkg-$(echo "${FILE%.*}" | tr -c 'A-Za-z0-9.\n-' '-')"
+            sha256sum "$FILE" > "$FILE.sha256"
+            if [ "$SIZE" -gt $((1900*1024*1024)) ]; then
+              split -b 1900M -d "$FILE" "$FILE.part"; rm "$FILE"
+            fi
+            gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 \
+              || gh release create "$TAG" -R "$REPO" -t "$FILE" -n "Hosted copy of $URL"
+            gh release upload "$TAG" -R "$REPO" --clobber ./*
+            LINK="https://github.com/$REPO/releases/download/$TAG/$FILE"
+            cd ..
+          fi
+
+          mkdir -p claude
+          echo "$(date -u +%F) $MODE $FILE $LINK" >> claude/index.txt
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add claude
+          git commit -m "claude: add $FILE" || true
+          git push
+          echo "### Done ($MODE)" >> "$GITHUB_STEP_SUMMARY"
+          echo "$LINK" >> "$GITHUB_STEP_SUMMARY"
