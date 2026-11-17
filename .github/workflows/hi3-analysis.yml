@@ -1,0 +1,45 @@
+name: HI3-5.4-Analysis
+on:
+  workflow_dispatch:
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Analyze
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out work
+          APK=work/hi3.apk
+          URL='https://www.apkmirror.com/wp-content/themes/APKMirror/download.php?forcebaseapk=true&id=3064552&key=c857148cf6ba0659e2da134dbeeb82e6386eb21d'
+          SHA='7303b021954b57cdc3db9fe6237cc5cba3e328b9e10a1e137fb18bc1f6d4d958'
+          curl -L --fail --retry 3 "$URL" -o "$APK"
+          echo "$SHA  $APK" | sha256sum -c -
+          unzip -q "$APK" -d work/apk
+          echo '=== BASIC ===' > out/HI3_5.4_ANALYSIS.txt
+          echo "Size: $(stat -c%s "$APK")" >> out/HI3_5.4_ANALYSIS.txt
+          echo '=== APK CONTENTS ===' >> out/HI3_5.4_ANALYSIS.txt
+          unzip -l "$APK" >> out/HI3_5.4_ANALYSIS.txt
+          echo '=== NATIVE LIBS ===' >> out/HI3_5.4_ANALYSIS.txt
+          find work/apk/lib -type f -name '*.so' -print >> out/HI3_5.4_ANALYSIS.txt 2>/dev/null || true
+          echo '=== NATIVE STRINGS ===' >> out/HI3_5.4_ANALYSIS.txt
+          find work/apk/lib -type f -name '*.so' -exec sh -c 'echo "### $1"; strings "$1" | grep -Ei "https?://|http|socket|connect|login|auth|account|server|gateway|dispatch|update|patch|version|notice|config|heartbeat|token|api" | head -300' _ {} \; >> out/HI3_5.4_ANALYSIS.txt 2>/dev/null || true
+          curl -L --fail -o work/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar
+          java -jar work/apktool.jar d "$APK" -o work/decoded -f
+          echo '=== MANIFEST ===' >> out/HI3_5.4_ANALYSIS.txt
+          cat work/decoded/AndroidManifest.xml >> out/HI3_5.4_ANALYSIS.txt
+          echo '=== URLS ===' >> out/HI3_5.4_ANALYSIS.txt
+          grep -RhoE 'https?://[^" <>()]+' work/decoded 2>/dev/null | sort -u >> out/HI3_5.4_ANALYSIS.txt || true
+          echo '=== NETWORK/AUTH/STARTUP ===' >> out/HI3_5.4_ANALYSIS.txt
+          grep -RniE 'login|logout|auth|authentication|account|token|session|server|gateway|dispatch|heartbeat|socket|connect|network|internet|online|offline|update|patch|version|maintenance|notice|config|download|resource|cdn' work/decoded 2>/dev/null | head -3000 >> out/HI3_5.4_ANALYSIS.txt || true
+          echo '=== RESOURCE NAMES ===' >> out/HI3_5.4_ANALYSIS.txt
+          find work/decoded/res -type f 2>/dev/null | grep -Ei 'server|config|login|auth|network|update|patch|stage|chapter|battle|character|avatar|item|resource' | head -1000 >> out/HI3_5.4_ANALYSIS.txt || true
+          echo '=== DEX STRINGS ===' >> out/HI3_5.4_ANALYSIS.txt
+          find work/apk -type f -name '*.dex' -exec strings {} \; 2>/dev/null | grep -Ei 'https?://|login|auth|server|gateway|dispatch|heartbeat|update|patch|token|account|offline|online' | sort -u | head -3000 >> out/HI3_5.4_ANALYSIS.txt || true
+          echo '=== HASH ===' >> out/HI3_5.4_ANALYSIS.txt
+          sha256sum "$APK" >> out/HI3_5.4_ANALYSIS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HI3-5.4-analysis
+          path: out/HI3_5.4_ANALYSIS.txt
