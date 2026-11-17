@@ -13,22 +13,22 @@ on:
         default: ""
       agp:
         description: "Android Gradle Plugin"
-        default: "8.5.2"
+        default: "9.2.1"
       kotlin:
-        description: "Kotlin version"
-        default: "2.0.20"
+        description: "Kotlin version (AGP 9 needs 2.2.10+)"
+        default: "2.3.10"
       ksp:
-        description: "KSP version (must match Kotlin)"
-        default: "2.0.20-1.0.25"
+        description: "KSP version"
+        default: "2.3.9"
       bom:
         description: "Compose BOM"
-        default: "2024.09.00"
+        default: "2026.09.00"
       gradle:
-        description: "Gradle version (AGP 8.5 needs 8.7+)"
-        default: "8.7"
+        description: "Gradle version (AGP 9.2 needs 9.4.1+)"
+        default: "9.4.1"
       api:
         description: "compileSdk"
-        default: "34"
+        default: "37"
 
 permissions:
   contents: write
@@ -70,7 +70,7 @@ jobs:
           # tools
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-$API" "build-tools;34.0.0"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-$API" "build-tools;36.0.0"
           curl -fL -o /tmp/g.zip "https://services.gradle.org/distributions/gradle-$GRADLE-bin.zip"
           unzip -q /tmp/g.zip -d /opt
           export PATH="/opt/gradle-$GRADLE/bin:$PATH"
@@ -94,7 +94,7 @@ jobs:
             id("com.google.devtools.ksp") version "$KSP" apply false
           }
           EOF
-          printf 'android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n' > $S/gradle.properties
+          printf 'android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\nandroid.builtInKotlin=false\nandroid.newDsl=false\n' > $S/gradle.properties
           echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application/></manifest>' > $S/app/src/main/AndroidManifest.xml
           echo 'package seed
           class Seed' > $S/app/src/main/java/seed/Seed.kt
@@ -109,11 +109,10 @@ jobs:
           android {
             namespace = "seed.app"
             compileSdk = $API
-            defaultConfig { applicationId = "seed.app"; minSdk = 21; targetSdk = $API; versionCode = 1; versionName = "1" }
+            defaultConfig { applicationId = "seed.app"; minSdk = 24; targetSdk = $API; versionCode = 1; versionName = "1" }
             buildTypes { release { isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt")) } }
             buildFeatures { compose = true }
             compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
-            kotlinOptions { jvmTarget = "17" }
           }
           dependencies {
             val bom = platform("androidx.compose:compose-bom:$BOM")
@@ -123,7 +122,7 @@ jobs:
             implementation("androidx.compose.ui:ui-graphics")
             implementation("androidx.compose.ui:ui-tooling-preview")
             implementation("androidx.compose.material3:material3")
-            implementation("androidx.compose.material:material-icons-extended")
+            implementation("androidx.compose.material:material-icons-extended:1.7.8")
             debugImplementation("androidx.compose.ui:ui-tooling")
             debugImplementation("androidx.compose.ui:ui-test-manifest")
             implementation("androidx.activity:activity-compose:1.9.2")
