@@ -1,0 +1,6 @@
+api=35
+build_tools=35.0.0
+ndk=27.2.12479018
+gradle=8.7
+jdk=17
+built=2026-11-17
