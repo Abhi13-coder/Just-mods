@@ -1,8 +1,0 @@
-SPDX-License-Identifier: GPL-3.0-only
-
-This plugin is distributed under the GNU General Public License, version 3.
-The full license text is available at:
-https://www.gnu.org/licenses/gpl-3.0.txt
-
-PipePipe's plugin template and extractor APIs are GPL-3.0. This plugin's own
-source is provided under the same license.
