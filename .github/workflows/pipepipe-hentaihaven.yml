@@ -1,0 +1,48 @@
+name: Build HentaiHaven PipePipe plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/pipepipe-hentaihaven.yml'
+      - 'pipepipe-plugins/hentaihaven/**'
+  pull_request:
+    paths:
+      - '.github/workflows/pipepipe-hentaihaven.yml'
+      - 'pipepipe-plugins/hentaihaven/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and package .ppp
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipepipe-plugins/hentaihaven
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;37.0.0" "platforms;android-36"
+
+      - name: Build, dex, and validate signed index
+        run: |
+          ./gradlew --no-daemon :tools:genKey -PpluginSigningKey="$RUNNER_TEMP/hentaihaven-ci.key"
+          ./gradlew --no-daemon :tools:index -PpluginSigningKey="$RUNNER_TEMP/hentaihaven-ci.key"
+
+      - name: Upload CI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipepipe-hentaihaven-ci
+          path: pipepipe-plugins/hentaihaven/build/repo/*
+          if-no-files-found: error
+          retention-days: 14
