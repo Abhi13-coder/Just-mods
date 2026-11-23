@@ -1,0 +1,113 @@
+name: Android Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      api:
+        description: "Android platform API"
+        default: "34"
+      build_tools:
+        description: "Build-tools version"
+        default: "34.0.0"
+      ndk:
+        description: "NDK version (sdkmanager style)"
+        default: "27.2.12479018"
+      gradle:
+        description: "Gradle version"
+        default: "8.7"
+      jdk:
+        description: "JDK major version"
+        default: "17"
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.jdk }}
+
+      - name: Install SDK parts and pack them
+        env:
+          API: ${{ inputs.api }}
+          BT: ${{ inputs.build_tools }}
+          NDK: ${{ inputs.ndk }}
+          GRADLE: ${{ inputs.gradle }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SM" --licenses >/dev/null || true
+          "$SM" "platform-tools" "cmdline-tools;latest" "build-tools;$BT" \
+                "platforms;android-$API" "ndk;$NDK" "cmake;3.22.1"
+
+          mkdir -p out
+          tar -czf out/platform-tools.tar.gz -C "$SDK" platform-tools
+          tar -czf out/cmdline-tools.tar.gz  -C "$SDK" cmdline-tools/latest
+          tar -czf out/build-tools.tar.gz    -C "$SDK" "build-tools/$BT"
+          tar -czf out/platforms.tar.gz      -C "$SDK" "platforms/android-$API"
+          tar -czf out/cmake.tar.gz          -C "$SDK" cmake/3.22.1
+          tar -czf out/ndk.tar.gz            -C "$SDK" "ndk/$NDK"
+          tar -czf out/jdk.tar.gz            -C "$JAVA_HOME" .
+          curl -fL -o out/gradle.zip "https://services.gradle.org/distributions/gradle-$GRADLE-bin.zip"
+
+          ls -lh out
+          for f in out/*; do
+            [ "$(stat -c%s "$f")" -gt $((1900*1024*1024)) ] && { echo "$f too big for a release asset"; exit 1; }
+          done
+
+          TAG="claude-tools"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" -t "Claude build toolchain" -n "JDK, SDK parts, NDK, Gradle for building APKs"
+          gh release upload "$TAG" --clobber out/*
+
+          mkdir -p claude
+          cat > claude/setup.sh <<'SETUP'
+          #!/bin/bash
+          # usage: [COMP="jdk gradle ..."] bash setup.sh [dir]
+          set -e
+          B="https://github.com/__REPO__/releases/download/claude-tools"
+          D="${1:-$HOME/android}"
+          COMP="${COMP:-jdk gradle platform-tools cmdline-tools build-tools platforms}"
+          mkdir -p "$D/sdk" "$D/jdk"
+          for c in $COMP; do
+            echo "== $c"
+            case "$c" in
+              jdk)    curl -fL "$B/jdk.tar.gz" | tar -xz -C "$D/jdk" ;;
+              gradle) curl -fL "$B/gradle.zip" -o /tmp/gradle.zip
+                      unzip -q -o /tmp/gradle.zip -d "$D" && rm -rf "$D/gradle"
+                      mv "$D"/gradle-[0-9]* "$D/gradle"; rm /tmp/gradle.zip ;;
+              *)      curl -fL "$B/$c.tar.gz" | tar -xz -C "$D/sdk" ;;
+            esac
+          done
+          cat > "$D/env.sh" <<ENV
+          export JAVA_HOME=$D/jdk
+          export ANDROID_HOME=$D/sdk
+          export ANDROID_SDK_ROOT=$D/sdk
+          export PATH=\$JAVA_HOME/bin:$D/gradle/bin:$D/sdk/platform-tools:$D/sdk/cmdline-tools/latest/bin:\$PATH
+          ENV
+          echo "Done. Run: source $D/env.sh"
+          SETUP
+          sed -i "s|__REPO__|$GITHUB_REPOSITORY|" claude/setup.sh
+          {
+            echo "api=$API"
+            echo "build_tools=$BT"
+            echo "ndk=$NDK"
+            echo "gradle=$GRADLE"
+            echo "jdk=${{ inputs.jdk }}"
+            echo "built=$(date -u +%F)"
+          } > claude/versions.txt
+
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add claude
+          git commit -m "claude: toolchain $BT / ndk $NDK" || true
+          git push
+          echo "setup: https://raw.githubusercontent.com/$GITHUB_REPOSITORY/HEAD/claude/setup.sh" >> "$GITHUB_STEP_SUMMARY"

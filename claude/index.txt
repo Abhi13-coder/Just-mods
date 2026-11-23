@@ -1,0 +1,1 @@
+2026-11-18 release gradle-9.4.1-bin.zip https://github.com/Abhi13-coder/Just-mods/releases/download/pkg-gradle-9.4.1-bin/gradle-9.4.1-bin.zip
