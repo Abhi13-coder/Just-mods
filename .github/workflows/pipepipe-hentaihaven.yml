@@ -99,7 +99,11 @@ jobs:
           java-version: ${{ steps.java.outputs.version }}
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
       - name: Discover Android SDK requirements
         id: android
