@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Just-mods | Android Engineering, ARM32 AI, Graphics and Software Experiments</title>
+<meta name="description" content="Just-mods by Abhi: Android modifications, an ARM32 port of AI Edge Gallery, ScreenFX, native graphics projects and automated APK analysis. Explore the projects on GitHub.">
+<meta name="keywords" content="Android mods, ARM32, AI Edge Gallery, LiteRT-LM, OpenGL ES, GTA San Andreas shader, APK analysis, GitHub Actions">
+<meta name="author" content="Abhi">
+<meta name="theme-color" content="#0b1118">
+<link rel="canonical" href="https://abhi13-coder.github.io/Just-mods/">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Just-mods">
+<meta property="og:title" content="Just-mods | Android Engineering, ARM32 AI, Graphics and Software Experiments">
+<meta property="og:description" content="A paper plane tour through five engineering projects: ARM32 AI Edge Gallery, ScreenFX, AgX Punchy, ToonSky and HI3 APK analysis.">
+<meta property="og:url" content="https://abhi13-coder.github.io/Just-mods/">
+<meta property="og:image" content="https://abhi13-coder.github.io/Just-mods/assets/og-image.png">
+<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Just-mods: a paper plane flying past an aerial engineering station">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Just-mods | Android Engineering, ARM32 AI, Graphics and Software Experiments">
+<meta name="twitter:description" content="A paper plane tour through five engineering projects on GitHub.">
+<meta name="twitter:image" content="https://abhi13-coder.github.io/Just-mods/assets/og-image.png">
+<link rel="stylesheet" href="css/style.css">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[
+{"@type":"WebSite","@id":"https://abhi13-coder.github.io/Just-mods/#site","name":"Just-mods","url":"https://abhi13-coder.github.io/Just-mods/","description":"Android modifications, AI tooling, graphics experiments and automated workflows by Abhi.","inLanguage":"en","author":{"@id":"https://abhi13-coder.github.io/Just-mods/#abhi"}},
+{"@type":"Person","@id":"https://abhi13-coder.github.io/Just-mods/#abhi","name":"Abhi","url":"https://github.com/Abhi13-coder","sameAs":["https://github.com/Abhi13-coder"]},
+{"@type":"SoftwareApplication","name":"AI Edge Gallery: ARM32 Edition","applicationCategory":"DeveloperApplication","operatingSystem":"Android","description":"An Android 10 and 32-bit ARM adaptation of AI Edge Gallery with extended tooling and native LiteRT-LM integration.","url":"https://github.com/Abhi13-coder/Just-mods/tree/main/prebuilt/armeabi-v7a","author":{"@id":"https://abhi13-coder.github.io/Just-mods/#abhi"}},
+{"@type":"SoftwareApplication","name":"ScreenFX","applicationCategory":"MultimediaApplication","operatingSystem":"Android","description":"An Android screen-effects application with image adjustments, presets, saved looks and an overlay service.","url":"https://github.com/Abhi13-coder/Just-mods/tree/main/ScreenFX","author":{"@id":"https://abhi13-coder.github.io/Just-mods/#abhi"}},
+{"@type":"CreativeWork","name":"AgX Punchy: GTA San Andreas","description":"An automated build workflow packaging a custom AgX grading shader with the SAShaderL native library for ARM32.","url":"https://github.com/Abhi13-coder/Just-mods/blob/main/AgX_Punchy_GTA_SA_GHA_Kit.zip","author":{"@id":"https://abhi13-coder.github.io/Just-mods/#abhi"}},
+{"@type":"SoftwareSourceCode","name":"ToonSky","programmingLanguage":"C++","description":"A native graphics project exploring OpenGL ES, toon shading, sky effects and post-processing.","codeRepository":"https://github.com/Abhi13-coder/Just-mods","author":{"@id":"https://abhi13-coder.github.io/Just-mods/#abhi"}},
+{"@type":"SoftwareSourceCode","name":"HI3 5.4 Analysis","description":"An automated APK inspection workflow examining package contents, native libraries and resources.","codeRepository":"https://github.com/Abhi13-coder/Just-mods","author":{"@id":"https://abhi13-coder.github.io/Just-mods/#abhi"}}
+]}
+</script>
+</head>
+<body>
+<a class="skip" href="#projects">Skip to projects</a>
+<div id="bar" aria-hidden="true"></div>
+<header>
+  <a href="#top" class="brand">Just-mods</a>
+  <nav aria-label="Project stations"><ol>
+    <li><a href="#ai-edge-gallery">01<span> AI Edge</span></a></li>
+    <li><a href="#screenfx">02<span> ScreenFX</span></a></li>
+    <li><a href="#agx-punchy">03<span> AgX</span></a></li>
+    <li><a href="#toonsky">04<span> ToonSky</span></a></li>
+    <li><a href="#hi3-analysis">05<span> HI3</span></a></li>
+  </ol></nav>
+</header>
+<canvas id="scene" aria-hidden="true"></canvas>
+<div id="hud" aria-hidden="true">DEPARTURE</div>
+<main id="top">
+<section class="edge" id="intro">
+  <div class="panel">
+    <img src="assets/mascot.png" width="144" height="96" alt="Just-mods mascot artwork" class="mascot">
+    <p class="tag">WORKSHOP / EXPERIMENTS / MODIFICATIONS</p>
+    <h1>Just-mods</h1>
+    <p>A workshop for experiments, modifications and ideas by Abhi: Android applications, native graphics, on-device AI and automated build workflows. Scroll to follow the paper plane through five engineered stations.</p>
+    <p><a class="go" href="#ai-edge-gallery">Begin the flight ↓</a></p>
+  </div>
+</section>
+<div id="projects"></div>
+<section class="stn" id="ai-edge-gallery" style="--a:#e8a04a" data-accent="#e8a04a">
+  <article class="panel">
+    <p class="tag">STATION 01 · ANDROID · ARM32</p>
+    <h2>AI Edge Gallery · ARM32 Edition</h2>
+    <p>An Android 10 and 32-bit ARM adaptation of Google's AI Edge Gallery, with extended tooling and native LiteRT-LM integration.</p>
+    <ul class="mods" aria-label="Components">
+      <li tabindex="0">ARM32 compatibility &amp; native integration</li>
+      <li tabindex="0">LiteRT-LM model execution</li>
+      <li tabindex="0">Alpine Linux terminal</li>
+      <li tabindex="0">Native mod loader</li>
+      <li tabindex="0">Agent tools &amp; workflows</li>
+      <li tabindex="0">Integrated browser &amp; background jobs</li>
+      <li tabindex="0">Safety &amp; execution controls</li>
+    </ul>
+    <a class="go" href="https://github.com/Abhi13-coder/Just-mods/tree/main/prebuilt/armeabi-v7a">Explore on GitHub →</a>
+  </article>
+</section>
+<section class="stn" id="screenfx" style="--a:#4fc3b0" data-accent="#4fc3b0">
+  <article class="panel">
+    <p class="tag">STATION 02 · ANDROID · IMAGING</p>
+    <h2>ScreenFX</h2>
+    <p>An Android screen-effects application featuring image adjustments, presets, saved looks and an overlay service.</p>
+    <ul class="mods" aria-label="Components">
+      <li tabindex="0">Image preview &amp; editing</li>
+      <li tabindex="0">Adjustment sliders</li>
+      <li tabindex="0">Presets &amp; saved looks</li>
+      <li tabindex="0">System-wide overlay service</li>
+      <li tabindex="0">Effect intensity control</li>
+    </ul>
+    <a class="go" href="https://github.com/Abhi13-coder/Just-mods/tree/main/ScreenFX">Explore on GitHub →</a>
+  </article>
+</section>
+<section class="stn" id="agx-punchy" style="--a:#e06b5b" data-accent="#e06b5b">
+  <article class="panel">
+    <p class="tag">STATION 03 · GAME GRAPHICS · CI</p>
+    <h2>AgX Punchy · GTA San Andreas</h2>
+    <p>An automated build workflow for packaging a custom AgX grading shader with the SAShaderL native library for ARM32.</p>
+    <ul class="mods" aria-label="Components">
+      <li tabindex="0">AgX colour grading shader</li>
+      <li tabindex="0">SAShaderL native integration</li>
+      <li tabindex="0">GitHub Actions build &amp; packaging</li>
+      <li tabindex="0">ARM32 target</li>
+    </ul>
+    <a class="go" href="https://github.com/Abhi13-coder/Just-mods/blob/main/AgX_Punchy_GTA_SA_GHA_Kit.zip">View the GHA kit →</a>
+  </article>
+</section>
+<section class="stn" id="toonsky" style="--a:#8fb8ff" data-accent="#8fb8ff">
+  <article class="panel">
+    <p class="tag">STATION 04 · NATIVE · OPENGL ES</p>
+    <h2>ToonSky</h2>
+    <p>A native graphics project exploring OpenGL ES, toon shading, sky effects and post-processing, written in C++17 for the Android Mod Loader.</p>
+    <ul class="mods" aria-label="Components">
+      <li tabindex="0">Toon shading</li>
+      <li tabindex="0">Sky replacement &amp; clouds</li>
+      <li tabindex="0">Sharpening</li>
+      <li tabindex="0">Tonemapping &amp; post-processing</li>
+      <li tabindex="0">C++17 / OpenGL ES core</li>
+      <li tabindex="0">Android Mod Loader integration</li>
+    </ul>
+    <a class="go" href="https://github.com/Abhi13-coder/Just-mods/tree/main/src">Explore the source →</a>
+  </article>
+</section>
+<section class="stn" id="hi3-analysis" style="--a:#b8cf6a" data-accent="#b8cf6a">
+  <article class="panel">
+    <p class="tag">STATION 05 · AUTOMATION · ANALYSIS</p>
+    <h2>HI3 5.4 Analysis</h2>
+    <p>An automated APK inspection workflow that examines package contents, native libraries, resources and other technical details.</p>
+    <ul class="mods" aria-label="Components">
+      <li tabindex="0">SHA-256 integrity verification</li>
+      <li tabindex="0">APK inspection</li>
+      <li tabindex="0">Native library inventory</li>
+      <li tabindex="0">String extraction</li>
+      <li tabindex="0">Manifest &amp; resource inspection</li>
+      <li tabindex="0">URL, network &amp; auth string analysis</li>
+      <li tabindex="0">Downloadable reports</li>
+    </ul>
+    <a class="go" href="https://github.com/Abhi13-coder/Just-mods/tree/main/.github/workflows">View the workflows →</a>
+  </article>
+</section>
+<section class="edge" id="landing">
+  <div class="panel">
+    <p class="tag">END OF ROUTE</p>
+    <h2>Made to experiment. Built to share.</h2>
+    <p>Everything here lives in one repository. If something was useful, you can support further experiments.</p>
+    <p><a class="go" href="https://github.com/Abhi13-coder/Just-mods">Repository →</a> &nbsp; <a class="go" href="https://buymeacoffee.com/abhi13.coder">☕ Buy me a coffee →</a></p>
+  </div>
+</section>
+</main>
+<footer><p>Just-mods · by <a href="https://github.com/Abhi13-coder">Abhi</a></p></footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+<script src="js/main.js" defer></script>
+</body>
+</html>

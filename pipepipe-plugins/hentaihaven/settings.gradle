@@ -1,0 +1,18 @@
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'hentaihaven'
+include 'tools'
+
+// Optional local extractor checkout:
+// add extractorDir=/path/to/PipePipeExtractor to local.properties.
+def localProps = new Properties()
+def localPropsFile = file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def extractorDir = localProps.getProperty('extractorDir')
+if (extractorDir != null) {
+    includeBuild(extractorDir)
+}

@@ -1,0 +1,14 @@
+JUST-MODS OVERLAY PACKAGE
+
+Extract this ZIP into the ROOT of your existing Just-mods repository.
+The archive contains only these new paths:
+  .github/workflows/pipepipe-hentaihaven.yml
+  pipepipe-plugins/hentaihaven/...
+
+It does not contain a top-level Just-mods/ folder and does not replace the
+repository's root README, build files, existing projects, or existing workflows.
+
+After extraction, commit the added files and run the new workflow from the
+GitHub Actions tab (or push the changes). The workflow uploads a CI artifact.
+See pipepipe-plugins/hentaihaven/README.md for build, API, signing, and
+publishing notes.

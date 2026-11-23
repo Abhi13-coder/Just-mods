@@ -1,0 +1,8 @@
+agp=9.2.1
+kotlin=2.3.10
+ksp=2.3.9
+compose_bom=2026.05.00
+gradle=9.4.1
+compileSdk=36
+built=2026-11-17
+cache_bytes=484317246
