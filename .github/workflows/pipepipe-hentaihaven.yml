@@ -1,0 +1,197 @@
+
+name: Build PipePipe HentaiHaven Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "**"
+      - ".github/workflows/pipepipe-hentaihaven.yml"
+  pull_request:
+    paths:
+      - "**"
+      - ".github/workflows/pipepipe-hentaihaven.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Discover PipePipe plugin project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching for PipePipe plugin manifest..."
+
+          MANIFEST="$(find . \
+            -type f \
+            -path '*/src/main/resources/plugin.json' \
+            -not -path '*/.git/*' \
+            -not -path '*/build/*' \
+            -print -quit)"
+
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::PipePipe plugin.json manifest not found"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$(dirname "$(dirname "$(dirname "$MANIFEST")")")")"
+
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+
+          echo "Manifest: $MANIFEST"
+          echo "Project root: $PROJECT_DIR"
+
+          if [ -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "Gradle settings: settings.gradle.kts"
+          elif [ -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "Gradle settings: settings.gradle"
+          else
+            echo "::error::Gradle settings file not found in discovered project"
+            exit 1
+          fi
+
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            WRAPPER="$PROJECT_DIR/gradlew"
+          else
+            echo "::error::Gradle wrapper not found in project root"
+            exit 1
+          fi
+
+          chmod +x "$WRAPPER"
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "wrapper=$WRAPPER" >> "$GITHUB_OUTPUT"
+
+      - name: Discover Java version
+        id: java
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          VERSION="25"
+
+          if [ -f gradle.properties ]; then
+            DETECTED="$(grep -E 'javaVersion|jdkVersion' gradle.properties \
+              | head -n 1 \
+              | grep -oE '[0-9]+' \
+              | head -n 1 || true)"
+
+            if [ -n "$DETECTED" ]; then
+              VERSION="$DETECTED"
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected Java version: $VERSION"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.java.outputs.version }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Discover Android SDK requirements
+        id: android
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          PLATFORM="36"
+          BUILD_TOOLS="37.0.0"
+
+          if [ -f build.gradle.kts ]; then
+            SOURCE="$(cat build.gradle.kts)"
+          elif [ -f build.gradle ]; then
+            SOURCE="$(cat build.gradle)"
+          else
+            SOURCE=""
+          fi
+
+          if [ -n "$SOURCE" ]; then
+            DETECTED_PLATFORM="$(echo "$SOURCE" \
+              | grep -oE 'compileSdk(Version)?[[:space:]]*[=(]?[[:space:]]*[0-9]+' \
+              | grep -oE '[0-9]+' \
+              | head -n 1 || true)"
+
+            if [ -n "$DETECTED_PLATFORM" ]; then
+              PLATFORM="$DETECTED_PLATFORM"
+            fi
+          fi
+
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "buildtools=$BUILD_TOOLS" >> "$GITHUB_OUTPUT"
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" \
+            "platforms;android-${{ steps.android.outputs.platform }}" \
+            "build-tools;${{ steps.android.outputs.buildtools }}"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate CI signing key
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          ./gradlew --no-daemon \
+            :tools:genKey \
+            -PpluginSigningKey="$RUNNER_TEMP/hentaihaven-ci.key"
+
+      - name: Build and generate plugin repository index
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          ./gradlew --no-daemon \
+            :tools:index \
+            -PpluginSigningKey="$RUNNER_TEMP/hentaihaven-ci.key"
+
+      - name: Discover generated plugin artifacts
+        id: artifacts
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/hentaihaven-artifacts"
+
+          FOUND=0
+
+          while IFS= read -r -d '' FILE; do
+            cp "$FILE" "$RUNNER_TEMP/hentaihaven-artifacts/"
+            echo "Found plugin artifact: $FILE"
+            FOUND=1
+          done < <(find . -type f -name '*.ppp' \
+            -not -path '*/.gradle/*' -print0)
+
+          while IFS= read -r -d '' FILE; do
+            cp "$FILE" "$RUNNER_TEMP/hentaihaven-artifacts/"
+            echo "Found repository index: $FILE"
+          done < <(find . -type f -name 'index.json' \
+            -not -path '*/.gradle/*' -print0)
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::No .ppp plugin artifact was generated"
+            exit 1
+          fi
+
+      - name: Upload plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hentaihaven-pipepipe-plugin
+          path: ${{ runner.temp }}/hentaihaven-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+          

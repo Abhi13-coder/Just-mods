@@ -1,0 +1,52 @@
+# Manual build: produces a debug APK for 32-bit ARM phones (armeabi-v7a) only.
+# Builds artcraft-android/filmcraft-android, checked out explicitly since this workflow
+# lives in a different repo (Just-mods).
+name: Build armeabi-v7a APK
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  apk:
+    name: APK (armeabi-v7a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: artcraft-android/filmcraft-android
+          ref: main
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Installs the Rust release/targets rust-toolchain.toml names (aarch64 + x86_64),
+      # then adds the 32-bit ARM target it doesn't list.
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustup target add armv7-linux-androideabi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: armv7-debug
+
+      - name: Install cargo-ndk and the Android NDK
+        run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" >/dev/null
+
+      - name: Build
+        working-directory: apps/filmcraft-android/android
+        run: ./gradlew assembleDebug "-Pfilmcraft.abis=armeabi-v7a" --no-daemon
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filmcraft-armeabi-v7a-debug
+          path: apps/filmcraft-android/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
