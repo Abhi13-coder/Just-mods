@@ -56,8 +56,6 @@ final class HentaiHavenSearchExtractor extends SearchExtractor {
                         return HavenApi.string(item, "posterUrl", "thumbnailUrl", "poster", "thumbnail", "cover");
                     }
                     @Override public String getUploaderName() { return "HentaiHaven"; }
-                    @Override public String getUploaderUrl() { return ""; }
-                    @Override public boolean isUploaderVerified() { return false; }
                     @Override public long getStreamCount() {
                         final long count = HavenApi.number(item, "episodeCount", "episodesCount", "episode_count");
                         return count >= 0 ? count : 0;
