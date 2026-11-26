@@ -1,0 +1,80 @@
+name: Fix HentaiHaven Plugin from Zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct download URL of the verified zip (leave empty to use the zip already in the repo)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download / locate zip
+        id: zip
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.zip_url }}" ]; then
+            curl -sL "${{ github.event.inputs.zip_url }}" -o /tmp/plugin.zip
+          elif [ -f hentaihaven-plugin-verified.zip ]; then
+            cp hentaihaven-plugin-verified.zip /tmp/plugin.zip
+          else
+            echo "::error::No zip found. Upload hentaihaven-plugin-verified.zip to the repo root or provide a zip_url."
+            exit 1
+          fi
+          echo "path=/tmp/plugin.zip" >> $GITHUB_OUTPUT
+
+      - name: Apply fixed sources
+        run: |
+          set -euo pipefail
+          
+          # Remove broken path if it exists
+          rm -rf pipepipe-plugins/hentaihaven/src/main/java/com/abhi13p
+          
+          # Clean old plugin source (keep tools + gradle wrapper)
+          rm -rf pipepipe-plugins/hentaihaven/src/main/java
+          
+          # Extract zip
+          mkdir -p /tmp/extracted
+          unzip -q ${{ steps.zip.outputs.path }} -d /tmp/extracted
+          
+          # Find the real root of the extracted content
+          SRC=$(find /tmp/extracted -type d -name "hentaihaven" | head -1)
+          if [ -z "$SRC" ]; then
+            SRC=$(find /tmp/extracted -type d -name "src" | head -1)
+            SRC=$(dirname "$SRC")
+          fi
+          
+          echo "Using source root: $SRC"
+          
+          # Create target structure
+          mkdir -p pipepipe-plugins/hentaihaven
+          
+          # Copy everything
+          cp -a "$SRC"/. pipepipe-plugins/hentaihaven/
+          
+          # Ensure correct java package path exists
+          mkdir -p pipepipe-plugins/hentaihaven/src/main/java/com/abhi13/pipepipe/hentaihaven
+          
+          echo "=== Final Java files ==="
+          find pipepipe-plugins/hentaihaven/src -name "*.java" | sort
+
+      - name: Commit the fixed sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pipepipe-plugins/hentaihaven
+          git diff --staged --quiet || git commit -m "fix: apply verified HentaiHaven plugin sources (zero compile errors)"
+          git push
+
+      - name: Trigger normal plugin build
+        run: |
+          echo "Sources fixed and pushed. The existing pipepipe-hentaihaven.yml workflow will run next."
